@@ -27,7 +27,7 @@ from typing import Literal
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,16 +56,14 @@ RoleType = Literal["owner", "recipient", "admin"]
 
 
 class RegisterRequest(BaseModel):
-    email: EmailStr
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_.\-]+$")
     password: str = Field(min_length=8, max_length=128)
     display_name: str | None = Field(default=None, max_length=128)
-    # Tự đăng ký luôn nhận role "owner" (bỏ qua field này).
-    # Dùng POST /admin/users để tạo account với role khác.
     role: RoleType = "owner"
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    username: str = Field(min_length=1)
     password: str = Field(min_length=1)
 
 
@@ -81,6 +79,11 @@ class TokenResponse(BaseModel):
 
 class ChangeRoleRequest(BaseModel):
     role: RoleType
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class UserOut(BaseModel):
@@ -199,18 +202,18 @@ async def register(
     - Muốn tạo account với role khác → dùng POST /admin/users
     """
     existing = (
-        await db.execute(select(User).where(User.email == body.email))
+        await db.execute(select(User).where(User.email == body.username))
     ).scalar_one_or_none()
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Email đã được đăng ký",
+            detail="Tên đăng nhập đã được sử dụng",
         )
 
     user = User(
         external_id=str(_uuid_mod.uuid4()),
-        email=body.email,
-        display_name=body.display_name or body.email.split("@")[0],
+        email=body.username,
+        display_name=body.display_name or body.username,
         role="owner",
         password_hash=_hash_password(body.password),
     )
@@ -224,7 +227,7 @@ async def register(
     audit.log_event(
         "user.register",
         user_id=user.id,
-        email=user.email,
+        username=user.email,
         role=user.role,
         ip=audit.get_ip(request),
         request_id=audit.get_request_id(request),
@@ -241,19 +244,19 @@ async def login(
 ):
     """Đăng nhập, trả access_token + set refresh_token cookie."""
     user = (
-        await db.execute(select(User).where(User.email == body.email))
+        await db.execute(select(User).where(User.email == body.username))
     ).scalar_one_or_none()
 
     if user is None or not user.password_hash:
-        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+        raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không đúng")
     if not _verify_password(body.password, user.password_hash):
         audit.log_event(
             "user.login.failed",
-            email=body.email,
+            username=body.username,
             ip=audit.get_ip(request),
             request_id=audit.get_request_id(request),
         )
-        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+        raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không đúng")
 
     jti, expires_at = await _issue_refresh_token(db, user, request)
     await db.commit()
@@ -393,6 +396,67 @@ async def logout(
     return {"message": "Đã đăng xuất"}
 
 
+@router.post("/change-password", response_model=TokenResponse)
+async def change_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    response: Response,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Đổi mật khẩu khi đã đăng nhập (Bearer access token).
+    Thu hồi mọi refresh session cũ, phát access + refresh mới.
+    """
+    user = (
+        await db.execute(select(User).where(User.id == current.id))
+    ).scalar_one_or_none()
+    if user is None or not user.password_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Tài khoản không hỗ trợ đổi mật khẩu kiểu này",
+        )
+    if not _verify_password(body.current_password, user.password_hash):
+        audit.log_event(
+            "user.password_change.failed",
+            user_id=user.id,
+            ip=audit.get_ip(request),
+            request_id=audit.get_request_id(request),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Mật khẩu hiện tại không đúng",
+        )
+    if body.current_password == body.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu mới phải khác mật khẩu hiện tại",
+        )
+
+    user.password_hash = _hash_password(body.new_password)
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
+    jti, expires_at = await _issue_refresh_token(db, user, request)
+    await db.commit()
+    _set_refresh_cookie(response, jti, expires_at)
+
+    audit.log_event(
+        "user.password_changed",
+        user_id=user.id,
+        role=user.role,
+        ip=audit.get_ip(request),
+        request_id=audit.get_request_id(request),
+    )
+    return _token_response(user)
+
+
 # ── Admin: quản lý users ──────────────────────────────────────────────────────
 
 
@@ -428,15 +492,15 @@ async def admin_create_user(
     _require_admin(current)
 
     existing = (
-        await db.execute(select(User).where(User.email == body.email))
+        await db.execute(select(User).where(User.email == body.username))
     ).scalar_one_or_none()
     if existing:
-        raise HTTPException(status_code=409, detail="Email đã được đăng ký")
+        raise HTTPException(status_code=409, detail="Tên đăng nhập đã được sử dụng")
 
     user = User(
         external_id=str(_uuid_mod.uuid4()),
-        email=body.email,
-        display_name=body.display_name or body.email.split("@")[0],
+        email=body.username,
+        display_name=body.display_name or body.username,
         role=body.role,
         password_hash=_hash_password(body.password),
     )
@@ -448,7 +512,7 @@ async def admin_create_user(
         "admin.create_user",
         user_id=current.id,
         role=current.role,
-        target_email=user.email,
+        target_username=user.email,
         target_role=user.role,
         request_id=audit.get_request_id(request),
     )

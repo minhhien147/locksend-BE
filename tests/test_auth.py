@@ -23,13 +23,13 @@ from tests.conftest import _auth, _login, _make_user
 class TestRegister:
     async def test_register_success(self, client: AsyncClient):
         resp = await client.post("/auth/register", json={
-            "email": "alice@test.com",
+            "username": "alice_test",
             "password": "password123",
             "display_name": "Alice",
         })
         assert resp.status_code == 201
         data = resp.json()
-        assert data["email"] == "alice@test.com"
+        assert data["email"] == "alice_test"
         assert data["role"] == "owner"          # tự đăng ký luôn là owner
         assert "access_token" in data
         assert data["display_name"] == "Alice"
@@ -37,7 +37,7 @@ class TestRegister:
     async def test_register_default_role_is_owner(self, client: AsyncClient):
         """Dù gửi role=admin, tự đăng ký vẫn nhận owner."""
         resp = await client.post("/auth/register", json={
-            "email": "sneaky@test.com",
+            "username": "sneaky_test",
             "password": "password123",
             "role": "admin",                    # cố tình gửi admin
         })
@@ -45,24 +45,24 @@ class TestRegister:
         assert resp.json()["role"] == "owner"   # phải bị ignore
 
     async def test_register_duplicate_email(self, client: AsyncClient, db_session: AsyncSession):
-        await _make_user(db_session, "dup@test.com")
+        await _make_user(db_session, "dup_test")
         resp = await client.post("/auth/register", json={
-            "email": "dup@test.com",
+            "username": "dup_test",
             "password": "password123",
         })
         assert resp.status_code == 409
-        assert "đã được đăng ký" in resp.json()["detail"]
+        assert "đã được" in resp.json()["detail"]
 
     async def test_register_password_too_short(self, client: AsyncClient):
         resp = await client.post("/auth/register", json={
-            "email": "short@test.com",
+            "username": "short_test",
             "password": "123",
         })
         assert resp.status_code == 422           # Pydantic validation error
 
-    async def test_register_invalid_email(self, client: AsyncClient):
+    async def test_register_invalid_username(self, client: AsyncClient):
         resp = await client.post("/auth/register", json={
-            "email": "not-an-email",
+            "username": "bad@name",
             "password": "password123",
         })
         assert resp.status_code == 422
@@ -74,7 +74,7 @@ class TestLogin:
     async def test_login_success(self, client: AsyncClient, db_session: AsyncSession):
         await _make_user(db_session, "bob@test.com", password="secret1234")
         resp = await client.post("/auth/login", json={
-            "email": "bob@test.com",
+            "username": "bob@test.com",
             "password": "secret1234",
         })
         assert resp.status_code == 200
@@ -86,7 +86,7 @@ class TestLogin:
     async def test_login_wrong_password(self, client: AsyncClient, db_session: AsyncSession):
         await _make_user(db_session, "carol@test.com")
         resp = await client.post("/auth/login", json={
-            "email": "carol@test.com",
+            "username": "carol@test.com",
             "password": "wrongpassword",
         })
         assert resp.status_code == 401
@@ -94,7 +94,7 @@ class TestLogin:
 
     async def test_login_unknown_email(self, client: AsyncClient):
         resp = await client.post("/auth/login", json={
-            "email": "nobody@test.com",
+            "username": "nobody@test.com",
             "password": "password123",
         })
         assert resp.status_code == 401
@@ -102,11 +102,49 @@ class TestLogin:
     async def test_login_returns_correct_role(self, client: AsyncClient, db_session: AsyncSession):
         await _make_user(db_session, "adminuser@test.com", role="admin")
         resp = await client.post("/auth/login", json={
-            "email": "adminuser@test.com",
+            "username": "adminuser@test.com",
             "password": "password123",
         })
         assert resp.status_code == 200
         assert resp.json()["role"] == "admin"
+
+
+class TestChangePassword:
+    async def test_change_password_success(self, client: AsyncClient, db_session: AsyncSession):
+        await _make_user(db_session, "pwuser@test.com", password="oldpass12")
+        login = await client.post(
+            "/auth/login",
+            json={"username": "pwuser@test.com", "password": "oldpass12"},
+        )
+        assert login.status_code == 200
+        token = login.json()["access_token"]
+        resp = await client.post(
+            "/auth/change-password",
+            json={"current_password": "oldpass12", "new_password": "newpass123"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 200
+        assert "access_token" in resp.json()
+        bad = await client.post(
+            "/auth/login",
+            json={"username": "pwuser@test.com", "password": "oldpass12"},
+        )
+        assert bad.status_code == 401
+        ok = await client.post(
+            "/auth/login",
+            json={"username": "pwuser@test.com", "password": "newpass123"},
+        )
+        assert ok.status_code == 200
+
+    async def test_change_password_wrong_current(self, client: AsyncClient, db_session: AsyncSession):
+        await _make_user(db_session, "pwuser2@test.com", password="secret1234")
+        token = await _login(client, "pwuser2@test.com", "secret1234")
+        resp = await client.post(
+            "/auth/change-password",
+            json={"current_password": "wrong", "new_password": "newpass123"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 401
 
 
 # ── Protected endpoints ───────────────────────────────────────────────────────

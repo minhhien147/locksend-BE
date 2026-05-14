@@ -18,9 +18,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth import CurrentUser, get_current_user, require_roles
+from auth import CurrentUser, get_current_user
 from db.dependencies import get_db
-from db.models import User
+from db.models import User, UserPublicKey
 from routers.auth_router import router as auth_router
 from routers.upload_router import router as upload_router
 from schemas.keys import KeyRecord
@@ -128,8 +128,6 @@ async def store_public_key(
     result = await db.execute(select(User).where(User.external_id == record.user_id))
     user = result.scalar_one_or_none()
     if user:
-        from db.models import UserPublicKey
-
         result2 = await db.execute(
             select(UserPublicKey)
             .where(UserPublicKey.user_id == user.id, UserPublicKey.is_active.is_(True))
@@ -142,9 +140,8 @@ async def store_public_key(
         else:
             new_version = 1
 
-        from db.models import UserPublicKey as UPK
         db.add(
-            UPK(
+            UserPublicKey(
                 user_id=user.id,
                 public_key_x25519=record.public_key_x25519,
                 public_key_ed25519=record.public_key_ed25519,
@@ -154,20 +151,4 @@ async def store_public_key(
         )
 
     return {"status": "stored", "user_id": record.user_id}
-
-# ── Admin: list users ─────────────────────────────────────────────────────────
-
-
-@app.get(
-    "/admin/users",
-    tags=["admin"],
-    dependencies=[Depends(require_roles("admin"))],
-)
-async def list_users(db: AsyncSession = Depends(get_db)):
-    """Xem danh sách tất cả users — chỉ admin."""
-    rows = (await db.execute(select(User))).scalars().all()
-    return [
-        {"id": u.id, "external_id": u.external_id, "email": u.email, "role": u.role}
-        for u in rows
-    ]
 

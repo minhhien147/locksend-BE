@@ -7,15 +7,25 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import CurrentUser, require_roles
 from db.dependencies import get_db
 from db.models import File as FileModel
-from db.models import FileRecipient, RecipientStatus, UploadSession, User
+from db.models import (
+    DownloadLog,
+    FileRecipient,
+    RecipientStatus,
+    UploadLog,
+    UploadSession,
+    User,
+)
 from schemas.files import (
+    DownloadLogRequest,
+    FileHistoryItem,
+    FreshSasResponse,
     MultipartFinalizeRequest,
     MultipartInitResponse,
     RevokeRequest,
@@ -31,17 +41,77 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["upload"])
 
 
+async def _persist_download_log(
+    request: Request,
+    current: CurrentUser,
+    db: AsyncSession,
+    *,
+    file_id: str | None,
+    blob_name: str | None,
+) -> dict:
+    if not file_id and not blob_name:
+        raise HTTPException(
+            status_code=422, detail="Cần có file_id hoặc blob_name"
+        )
+    file_row = None
+    if file_id:
+        file_row = (
+            await db.execute(select(FileModel).where(FileModel.id == file_id))
+        ).scalar_one_or_none()
+    if file_row is None and blob_name:
+        file_row = (
+            await db.execute(
+                select(FileModel).where(FileModel.blob_name == blob_name)
+            )
+        ).scalar_one_or_none()
+
+    blob_logged = (
+        file_row.blob_name
+        if file_row
+        else (blob_name or file_id or "unknown")
+    )
+    orig_logged = file_row.original_filename if file_row else "unknown"
+    size_logged = file_row.file_size_bytes if file_row else 0
+    fid_logged = file_row.id if file_row else None
+
+    db.add(
+        DownloadLog(
+            user_id=current.id,
+            file_id=fid_logged,
+            blob_name=blob_logged,
+            original_filename=orig_logged,
+            file_size_bytes=size_logged,
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    )
+    audit.log_event(
+        "file.download",
+        user_id=current.id,
+        role=current.role,
+        file_id=fid_logged,
+        blob_name=blob_logged,
+    )
+    return {"status": "logged"}
+
+
 @router.post("/upload", response_model=SasResponse)
 async def upload_file(
+    request: Request,
     file: UploadFile = File(...),
     metadata_json: str = Form(...),
     current: CurrentUser = Depends(require_roles("owner", "admin")),
+    db: AsyncSession = Depends(get_db),
 ):
     """Nhận ciphertext + metadata đã mã hóa client-side, upload lên Azure Blob."""
     blob_name = f"{uuid.uuid4()}/{file.filename}"
     ciphertext = await file.read()
+    file_size = len(ciphertext)
 
     ciphertext_checksum = hashlib.sha256(ciphertext).hexdigest()
+
+    # Azure Blob metadata chỉ chấp nhận latin-1; encode base64 để an toàn với Unicode
+    metadata_b64 = b64mod.b64encode(metadata_json.encode("utf-8")).decode("ascii")
 
     try:
         client = get_blob_service_client()
@@ -50,13 +120,69 @@ async def upload_file(
             ciphertext,
             overwrite=True,
             metadata={
-                "encryption_metadata": metadata_json,
+                "encryption_metadata_b64": metadata_b64,
                 "ciphertext_checksum": ciphertext_checksum,
             },
         )
     except Exception as exc:  # pragma: no cover - network failure
         logger.exception("Upload failed for user %s: %s", current.id, exc)
         raise HTTPException(status_code=500, detail="Upload failed")
+
+    try:
+        meta = json.loads(metadata_json)
+    except json.JSONDecodeError:
+        meta = {}
+
+    original_filename = meta.get("filename") or file.filename or blob_name.split("/")[-1]
+    encryption_alg = meta.get("encryption_alg") or meta.get("algorithm") or "X25519+HKDF+AES-256-GCM"
+
+    file_record = FileModel(
+        owner_id=current.id,
+        blob_name=blob_name,
+        original_filename=original_filename,
+        content_type=file.content_type or meta.get("content_type"),
+        file_size_bytes=file_size,
+        encryption_alg=encryption_alg,
+        chunk_size_bytes=None,
+        chunk_count=1,
+        metadata_json=meta,
+    )
+    db.add(file_record)
+    await db.flush()
+
+    try:
+        client = get_blob_service_client()
+        blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
+        blob_client.set_blob_metadata(
+            {
+                "encryption_metadata_b64": metadata_b64,
+                "ciphertext_checksum": ciphertext_checksum,
+                "file_id": file_record.id,
+            }
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("set_blob_metadata(file_id) failed: %s", exc)
+
+    db.add(UploadLog(
+        user_id=current.id,
+        file_id=file_record.id,
+        blob_name=blob_name,
+        original_filename=original_filename,
+        file_size_bytes=file_size,
+        upload_type="single",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    ))
+
+    audit.log_event(
+        "file.upload",
+        user_id=current.id,
+        role=current.role,
+        file_id=file_record.id,
+        blob_name=blob_name,
+        file_size_bytes=file_size,
+        ciphertext_sha256=ciphertext_checksum,
+    )
 
     sas_url, expires_at = generate_sas_url(blob_name)
     logger.info(
@@ -66,14 +192,28 @@ async def upload_file(
         ciphertext_checksum,
         getattr(current, "request_id", "-"),
     )
-    return SasResponse(sas_url=sas_url, blob_name=blob_name, expires_at=expires_at)
+    return SasResponse(
+        sas_url=sas_url, blob_name=blob_name, expires_at=expires_at, file_id=file_record.id
+    )
 
 
 @router.get("/sas-token/{blob_name:path}", response_model=SasResponse)
-def get_sas_token(blob_name: str, _: CurrentUser = Depends(require_roles("owner", "admin"))):
+async def get_sas_token(
+    blob_name: str,
+    _: CurrentUser = Depends(require_roles("owner", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
     """Tạo SAS token read-only 1h cho blob đã tồn tại."""
     sas_url, expires_at = generate_sas_url(blob_name, hours=1)
-    return SasResponse(sas_url=sas_url, blob_name=blob_name, expires_at=expires_at)
+    row = (
+        await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))
+    ).scalar_one_or_none()
+    return SasResponse(
+        sas_url=sas_url,
+        blob_name=blob_name,
+        expires_at=expires_at,
+        file_id=row.id if row else None,
+    )
 
 
 @router.post("/upload/multipart/init", response_model=MultipartInitResponse)
@@ -150,6 +290,7 @@ async def multipart_upload_chunk(
 
 @router.post("/upload/multipart/{blob_name:path}/finalize", response_model=SasResponse)
 async def multipart_finalize(
+    request: Request,
     blob_name: str,
     body: MultipartFinalizeRequest,
     current: CurrentUser = Depends(require_roles("owner", "admin")),
@@ -176,13 +317,16 @@ async def multipart_finalize(
     except (json.JSONDecodeError, AttributeError):
         has_chunk_checksums = False
 
+    # Azure Blob metadata chỉ chấp nhận latin-1; encode base64 để an toàn với Unicode
+    metadata_b64 = b64mod.b64encode(body.metadata_json.encode("utf-8")).decode("ascii")
+
     try:
         client = get_blob_service_client()
         blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
         blob_client.commit_block_list(
             block_ids,
             metadata={
-                "encryption_metadata": body.metadata_json,
+                "encryption_metadata_b64": metadata_b64,
                 "has_chunk_checksums": str(has_chunk_checksums).lower(),
             },
         )
@@ -263,6 +407,30 @@ async def multipart_finalize(
         .values(status="finalized", expected_chunk_count=body.chunk_count)
     )
 
+    db.add(UploadLog(
+        user_id=current.id,
+        file_id=file_record.id,
+        blob_name=blob_name,
+        original_filename=original_filename,
+        file_size_bytes=body.file_size_bytes or meta.get("file_size_bytes", 0),
+        upload_type="multipart",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    ))
+
+    try:
+        client2 = get_blob_service_client()
+        blob_client2 = client2.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
+        blob_client2.set_blob_metadata(
+            {
+                "encryption_metadata_b64": metadata_b64,
+                "has_chunk_checksums": str(has_chunk_checksums).lower(),
+                "file_id": file_record.id,
+            }
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("set_blob_metadata(file_id) multipart failed: %s", exc)
+
     sas_url, expires_at = generate_sas_url(blob_name)
     logger.info(
         "Multipart finalize success blob=%s user=%s chunks=%d has_chunk_checksums=%s",
@@ -271,7 +439,12 @@ async def multipart_finalize(
         body.chunk_count,
         has_chunk_checksums,
     )
-    return SasResponse(sas_url=sas_url, blob_name=blob_name, expires_at=expires_at)
+    return SasResponse(
+        sas_url=sas_url,
+        blob_name=blob_name,
+        expires_at=expires_at,
+        file_id=file_record.id,
+    )
 
 
 @router.get("/files/shared-with-me", response_model=list[SharedFileResponse])
@@ -309,6 +482,90 @@ async def shared_with_me(
     ]
 
 
+@router.post("/files/download-log", status_code=201)
+async def record_download_log_body(
+    request: Request,
+    body: DownloadLogRequest,
+    current: CurrentUser = Depends(require_roles("owner", "recipient", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ghi download_logs — gửi file_id (ưu tiên) hoặc blob_name (parse từ SAS URL)."""
+    return await _persist_download_log(
+        request,
+        current,
+        db,
+        file_id=body.file_id,
+        blob_name=body.blob_name,
+    )
+
+
+@router.post("/files/{file_id}/download-log", status_code=201)
+async def record_download_log_by_path(
+    request: Request,
+    file_id: str,
+    current: CurrentUser = Depends(require_roles("owner", "recipient", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tương thích: chỉ cần file_id trên URL."""
+    return await _persist_download_log(
+        request, current, db, file_id=file_id, blob_name=None
+    )
+
+
+@router.get("/files/my-files", response_model=list[FileHistoryItem])
+async def my_files(
+    current: CurrentUser = Depends(require_roles("owner", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lịch sử file đã upload của user hiện tại, mới nhất trước."""
+    result = await db.execute(
+        select(FileModel)
+        .where(FileModel.owner_id == current.id)
+        .order_by(FileModel.created_at.desc())
+    )
+    files = result.scalars().all()
+    return [
+        FileHistoryItem(
+            file_id=f.id,
+            blob_name=f.blob_name,
+            original_filename=f.original_filename,
+            content_type=f.content_type,
+            file_size_bytes=f.file_size_bytes,
+            encryption_alg=f.encryption_alg,
+            chunk_count=f.chunk_count,
+            created_at=f.created_at.isoformat(),
+            updated_at=f.updated_at.isoformat(),
+        )
+        for f in files
+    ]
+
+
+@router.get("/files/{file_id}/sas", response_model=FreshSasResponse)
+async def refresh_sas(
+    file_id: str,
+    current: CurrentUser = Depends(require_roles("owner", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tạo lại SAS URL mới (24h) cho file đã upload — dùng khi link cũ hết hạn."""
+    result = await db.execute(
+        select(FileModel).where(
+            FileModel.id == file_id,
+            FileModel.owner_id == current.id,
+        )
+    )
+    file = result.scalar_one_or_none()
+    if file is None:
+        raise HTTPException(status_code=404, detail="File không tồn tại hoặc không thuộc về bạn")
+
+    sas_url, expires_at = generate_sas_url(file.blob_name)
+    return FreshSasResponse(
+        file_id=file.id,
+        blob_name=file.blob_name,
+        sas_url=sas_url,
+        expires_at=expires_at,
+    )
+
+
 @router.post("/files/{file_id}/revoke/{recipient_id}")
 async def revoke_recipient(
     file_id: str,
@@ -339,8 +596,6 @@ async def revoke_recipient(
         raise HTTPException(status_code=404, detail="Recipient không tồn tại cho file này")
     if fr.status == RecipientStatus.revoked:
         raise HTTPException(status_code=409, detail="Recipient đã bị revoke trước đó")
-
-    from datetime import datetime, timezone
 
     fr.status = RecipientStatus.revoked
     fr.revoked_at = datetime.now(timezone.utc)

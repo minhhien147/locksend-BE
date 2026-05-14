@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class KeyRecord(BaseModel):
@@ -16,6 +16,20 @@ class SasResponse(BaseModel):
     sas_url: str
     blob_name: str
     expires_at: str
+    file_id: Optional[str] = None
+
+
+class DownloadLogRequest(BaseModel):
+    """Ghi download_logs — cần ít nhất một trong hai."""
+
+    file_id: Optional[str] = None
+    blob_name: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_identifier(self) -> "DownloadLogRequest":
+        if not self.file_id and not self.blob_name:
+            raise ValueError("Cần có file_id hoặc blob_name")
+        return self
 
 
 class MultipartInitResponse(BaseModel):
@@ -45,6 +59,25 @@ class MultipartFinalizeRequest(BaseModel):
 
 class RevokeRequest(BaseModel):
     reason: Optional[str] = None
+
+
+class FileHistoryItem(BaseModel):
+    file_id: str
+    blob_name: str
+    original_filename: str
+    content_type: Optional[str]
+    file_size_bytes: int
+    encryption_alg: str
+    chunk_count: int
+    created_at: str
+    updated_at: str
+
+
+class FreshSasResponse(BaseModel):
+    file_id: str
+    blob_name: str
+    sas_url: str
+    expires_at: str
 
 
 class SharedFileResponse(BaseModel):

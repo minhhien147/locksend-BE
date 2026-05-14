@@ -172,7 +172,10 @@ async def _make_user(
 
 async def _login(client: AsyncClient, email: str, password: str = "password123") -> str:
     """Đăng nhập qua API, trả access_token."""
-    resp = await client.post("/auth/login", json={"email": email, "password": password})
+    resp = await client.post(
+        "/auth/login",
+        json={"username": email, "password": password},
+    )
     assert resp.status_code == 200, f"Login failed ({resp.status_code}): {resp.text}"
     return resp.json()["access_token"]
 

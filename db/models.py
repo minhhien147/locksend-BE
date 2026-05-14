@@ -272,3 +272,65 @@ class RefreshToken(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="refresh_tokens")
+
+
+class UploadLog(Base):
+    """
+    Ghi nhận mỗi lần upload thành công (single-shot hoặc multipart finalize).
+    Không xoá theo file — giữ audit trail kể cả khi file bị xoá.
+    """
+    __tablename__ = "upload_logs"
+    __table_args__ = (
+        Index("ix_upload_logs_user_id", "user_id"),
+        Index("ix_upload_logs_file_id", "file_id"),
+        Index("ix_upload_logs_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    file_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("files.id", ondelete="SET NULL"), nullable=True
+    )
+    blob_name: Mapped[str] = mapped_column(Text, nullable=False)
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    upload_type: Mapped[str] = mapped_column(Text, nullable=False, default="single")  # single | multipart
+    ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User | None"] = relationship()
+    file: Mapped["File | None"] = relationship()
+
+
+class DownloadLog(Base):
+    """
+    Ghi nhận mỗi lần tải file thành công.
+    FE gọi POST /files/{file_id}/download-log sau khi giải mã xong.
+    """
+    __tablename__ = "download_logs"
+    __table_args__ = (
+        Index("ix_download_logs_user_id", "user_id"),
+        Index("ix_download_logs_file_id", "file_id"),
+        Index("ix_download_logs_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    file_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("files.id", ondelete="SET NULL"), nullable=True
+    )
+    blob_name: Mapped[str] = mapped_column(Text, nullable=False)
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
