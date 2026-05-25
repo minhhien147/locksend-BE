@@ -334,3 +334,88 @@ class DownloadLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+# ── AI Token Security ──────────────────────────────────────────────────────────
+
+
+class SasTokenRecord(Base):
+    """
+    Bản ghi mỗi SAS URL được cấp. Không lưu token thực — chỉ lưu token_id (UUID)
+    để tham chiếu trong access logs và cho phép soft-revoke.
+
+    Soft revoke: khi is_revoked=True, backend từ chối cấp SAS mới cho blob này
+    với user này cho đến khi hết thời gian phân tích hoặc admin reset.
+    (Azure SAS không có true revoke nếu không dùng Stored Access Policy.)
+    """
+    __tablename__ = "sas_token_records"
+    __table_args__ = (
+        Index("ix_sas_records_user_id", "user_id"),
+        Index("ix_sas_records_blob_name", "blob_name"),
+        Index("ix_sas_records_expires_at", "expires_at"),
+        Index("ix_sas_records_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    token_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    blob_name: Mapped[str] = mapped_column(Text, nullable=False)
+    file_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("files.id", ondelete="SET NULL"), nullable=True
+    )
+    ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoke_reason: Mapped[str | None] = mapped_column(Text)
+    # Thống kê: cập nhật khi access log ghi nhận thêm
+    access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unique_ip_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ai_risk_score: Mapped[int | None] = mapped_column(Integer)
+    ai_risk_level: Mapped[str | None] = mapped_column(Text)
+    ai_recommendation: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User | None"] = relationship()
+
+
+class TokenAccessLog(Base):
+    """
+    Log chi tiết mỗi lần token được sử dụng (JWT access token hoặc SAS request).
+    Dùng làm nguồn dữ liệu cho token security rule engine / AI tích hợp.
+    Không lưu giá trị token — chỉ lưu token_ref (jti ẩn hoặc sas token_id).
+    """
+    __tablename__ = "token_access_logs"
+    __table_args__ = (
+        Index("ix_tal_user_id", "user_id"),
+        Index("ix_tal_token_type", "token_type"),
+        Index("ix_tal_token_ref", "token_ref"),
+        Index("ix_tal_ip_address", "ip_address"),
+        Index("ix_tal_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # "jwt" hoặc "sas"
+    token_type: Mapped[str] = mapped_column(Text, nullable=False)
+    # jti (masked) cho JWT; token_id cho SAS
+    token_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    http_method: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    country_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User | None"] = relationship()

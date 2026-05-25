@@ -7,7 +7,9 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-# Import models so autogenerate can detect all tables.
+from db.database_url import get_database_url
+
+# Import models so autogenerate can detect all tables (không load engine qua db/__init__).
 from db.base import Base  # noqa: F401
 from db.models import (  # noqa: F401
     File,
@@ -22,8 +24,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Override sqlalchemy.url from environment (supports async DB drivers like asyncpg).
-database_url = os.environ["DATABASE_URL"]
+# Override sqlalchemy.url (Railway: postgresql:// → postgresql+asyncpg://).
+database_url = get_database_url()
 config.set_main_option("sqlalchemy.url", database_url)
 
 target_metadata = Base.metadata

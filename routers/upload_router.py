@@ -28,6 +28,7 @@ from schemas.files import (
     FreshSasResponse,
     MultipartFinalizeRequest,
     MultipartInitResponse,
+    RecipientInfo,
     RevokeRequest,
     SasResponse,
     SharedFileResponse,
@@ -37,6 +38,53 @@ import audit
 
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ip(request: Request) -> str | None:
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
+async def _generate_and_track_sas(
+    request: Request,
+    db: AsyncSession,
+    current: CurrentUser,
+    *,
+    blob_name: str,
+    file_id: str | None,
+    hours: int,
+    endpoint: str,
+) -> tuple[str, str]:
+    """Tạo SAS URL + ghi sas_token_records và token_access_logs."""
+    from services.token_security import (
+        is_sas_revoked,
+        parse_sas_expires,
+        track_sas_issue,
+    )
+
+    if await is_sas_revoked(db, blob_name, current.id):
+        raise HTTPException(
+            status_code=403,
+            detail="SAS token cho blob này đã bị thu hồi bởi quản trị viên",
+        )
+
+    sas_url, expires_at = generate_sas_url(blob_name, hours=hours)
+    expires_dt = parse_sas_expires(expires_at)
+    await track_sas_issue(
+        db,
+        blob_name=blob_name,
+        user_id=current.id,
+        ip_address=_get_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+        expires_at=expires_dt,
+        file_id=file_id,
+        endpoint=endpoint,
+        http_method=request.method,
+    )
+    return sas_url, expires_at
+
 
 router = APIRouter(tags=["upload"])
 
@@ -100,6 +148,7 @@ async def upload_file(
     request: Request,
     file: UploadFile = File(...),
     metadata_json: str = Form(...),
+    recipients_json: str = Form(default=None),
     current: CurrentUser = Depends(require_roles("owner", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -163,6 +212,46 @@ async def upload_file(
     except Exception as exc:  # pragma: no cover
         logger.warning("set_blob_metadata(file_id) failed: %s", exc)
 
+    if recipients_json:
+        try:
+            recipients_data = json.loads(recipients_json)
+        except json.JSONDecodeError:
+            recipients_data = []
+
+        if recipients_data:
+            recipient_ids = [r["recipient_id"] for r in recipients_data]
+            if len(recipient_ids) != len(set(recipient_ids)):
+                raise HTTPException(status_code=422, detail="Danh sách recipients có ID bị trùng")
+            if current.id in recipient_ids:
+                raise HTTPException(status_code=422, detail="Owner không thể thêm chính mình làm recipient")
+
+            found_ids = set(
+                (await db.execute(select(User.id).where(User.id.in_(recipient_ids)))).scalars().all()
+            )
+            missing = set(recipient_ids) - found_ids
+            if missing:
+                raise HTTPException(status_code=422, detail=f"Recipient không tồn tại: {sorted(missing)}")
+
+            for r in recipients_data:
+                db.add(
+                    FileRecipient(
+                        file_id=file_record.id,
+                        recipient_id=r["recipient_id"],
+                        wrapped_file_key=r.get("wrapped_file_key", ""),
+                        wrapped_key_alg=r.get("wrapped_key_alg", "X25519-HKDF"),
+                        key_id=r.get("key_id"),
+                        wrapped_key_version=r.get("wrapped_key_version", 1),
+                        status=RecipientStatus.active,
+                    )
+                )
+            audit.log_event(
+                "file.share",
+                user_id=current.id,
+                role=current.role,
+                file_id=file_record.id,
+                recipient_count=len(recipients_data),
+            )
+
     db.add(UploadLog(
         user_id=current.id,
         file_id=file_record.id,
@@ -184,7 +273,15 @@ async def upload_file(
         ciphertext_sha256=ciphertext_checksum,
     )
 
-    sas_url, expires_at = generate_sas_url(blob_name)
+    sas_url, expires_at = await _generate_and_track_sas(
+        request,
+        db,
+        current,
+        blob_name=blob_name,
+        file_id=file_record.id,
+        hours=24,
+        endpoint="/upload",
+    )
     logger.info(
         "Upload success blob=%s user=%s ciphertext_sha256=%s request_id=%s",
         blob_name,
@@ -200,14 +297,25 @@ async def upload_file(
 @router.get("/sas-token/{blob_name:path}", response_model=SasResponse)
 async def get_sas_token(
     blob_name: str,
-    _: CurrentUser = Depends(require_roles("owner", "admin")),
+    request: Request,
+    current: CurrentUser = Depends(require_roles("owner", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Tạo SAS token read-only 1h cho blob đã tồn tại."""
-    sas_url, expires_at = generate_sas_url(blob_name, hours=1)
+    """Tạo SAS token read-only 1h cho blob đã tồn tại. Ghi nhận vào sas_token_records."""
     row = (
         await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))
     ).scalar_one_or_none()
+
+    sas_url, expires_at = await _generate_and_track_sas(
+        request,
+        db,
+        current,
+        blob_name=blob_name,
+        file_id=row.id if row else None,
+        hours=1,
+        endpoint=f"/sas-token/{blob_name}",
+    )
+
     return SasResponse(
         sas_url=sas_url,
         blob_name=blob_name,
@@ -431,7 +539,15 @@ async def multipart_finalize(
     except Exception as exc:  # pragma: no cover
         logger.warning("set_blob_metadata(file_id) multipart failed: %s", exc)
 
-    sas_url, expires_at = generate_sas_url(blob_name)
+    sas_url, expires_at = await _generate_and_track_sas(
+        request,
+        db,
+        current,
+        blob_name=blob_name,
+        file_id=file_record.id,
+        hours=24,
+        endpoint=f"/upload/multipart/{blob_name}/finalize",
+    )
     logger.info(
         "Multipart finalize success blob=%s user=%s chunks=%d has_chunk_checksums=%s",
         blob_name,
@@ -454,8 +570,9 @@ async def shared_with_me(
 ):
     """Danh sách file được chia sẻ cho user hiện tại (status=active)."""
     stmt = (
-        select(FileRecipient, FileModel)
+        select(FileRecipient, FileModel, User)
         .join(FileModel, FileRecipient.file_id == FileModel.id)
+        .join(User, FileModel.owner_id == User.id)
         .where(
             FileRecipient.recipient_id == current.id,
             FileRecipient.status == RecipientStatus.active,
@@ -477,9 +594,57 @@ async def shared_with_me(
             wrapped_key_alg=fr.wrapped_key_alg,
             key_id=fr.key_id,
             wrapped_key_version=fr.wrapped_key_version,
+            sender_name=sender.display_name or sender.email,
+            sender_email=sender.email,
         )
-        for fr, file in rows
+        for fr, file, sender in rows
     ]
+
+
+@router.get("/files/shared/{file_id}/sas", response_model=FreshSasResponse)
+async def shared_file_sas(
+    file_id: str,
+    request: Request,
+    current: CurrentUser = Depends(require_roles("owner", "recipient", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Tạo SAS URL cho file được chia sẻ.
+    Chỉ cho phép recipient đang active của file đó truy cập.
+    """
+    fr_row = (
+        await db.execute(
+            select(FileRecipient).where(
+                FileRecipient.file_id == file_id,
+                FileRecipient.recipient_id == current.id,
+                FileRecipient.status == RecipientStatus.active,
+            )
+        )
+    ).scalar_one_or_none()
+    if fr_row is None:
+        raise HTTPException(status_code=404, detail="File không tồn tại hoặc bạn không phải recipient")
+
+    file = (
+        await db.execute(select(FileModel).where(FileModel.id == file_id))
+    ).scalar_one_or_none()
+    if file is None:
+        raise HTTPException(status_code=404, detail="File không tồn tại")
+
+    sas_url, expires_at = await _generate_and_track_sas(
+        request,
+        db,
+        current,
+        blob_name=file.blob_name,
+        file_id=file.id,
+        hours=24,
+        endpoint=f"/files/shared/{file_id}/sas",
+    )
+    return FreshSasResponse(
+        file_id=file.id,
+        blob_name=file.blob_name,
+        sas_url=sas_url,
+        expires_at=expires_at,
+    )
 
 
 @router.post("/files/download-log", status_code=201)
@@ -524,6 +689,29 @@ async def my_files(
         .order_by(FileModel.created_at.desc())
     )
     files = result.scalars().all()
+
+    file_ids = [f.id for f in files]
+    recipients_map: dict[str, list[RecipientInfo]] = {fid: [] for fid in file_ids}
+    if file_ids:
+        fr_rows = (
+            await db.execute(
+                select(FileRecipient, User)
+                .join(User, FileRecipient.recipient_id == User.id)
+                .where(FileRecipient.file_id.in_(file_ids))
+                .order_by(FileRecipient.granted_at)
+            )
+        ).all()
+        for fr, usr in fr_rows:
+            recipients_map[fr.file_id].append(
+                RecipientInfo(
+                    recipient_id=fr.recipient_id,
+                    email=usr.email,
+                    display_name=usr.display_name,
+                    status=fr.status.value if hasattr(fr.status, "value") else str(fr.status),
+                    granted_at=fr.granted_at.isoformat(),
+                )
+            )
+
     return [
         FileHistoryItem(
             file_id=f.id,
@@ -535,6 +723,7 @@ async def my_files(
             chunk_count=f.chunk_count,
             created_at=f.created_at.isoformat(),
             updated_at=f.updated_at.isoformat(),
+            recipients=recipients_map.get(f.id, []),
         )
         for f in files
     ]
@@ -543,6 +732,7 @@ async def my_files(
 @router.get("/files/{file_id}/sas", response_model=FreshSasResponse)
 async def refresh_sas(
     file_id: str,
+    request: Request,
     current: CurrentUser = Depends(require_roles("owner", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -557,7 +747,15 @@ async def refresh_sas(
     if file is None:
         raise HTTPException(status_code=404, detail="File không tồn tại hoặc không thuộc về bạn")
 
-    sas_url, expires_at = generate_sas_url(file.blob_name)
+    sas_url, expires_at = await _generate_and_track_sas(
+        request,
+        db,
+        current,
+        blob_name=file.blob_name,
+        file_id=file.id,
+        hours=24,
+        endpoint=f"/files/{file_id}/sas",
+    )
     return FreshSasResponse(
         file_id=file.id,
         blob_name=file.blob_name,

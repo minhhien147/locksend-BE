@@ -27,14 +27,14 @@ from typing import Literal
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from passlib.context import CryptContext
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import audit
 from auth import CurrentUser, JWT_ALGORITHM, _signing_key, get_current_user
 from db.dependencies import get_db
-from db.models import RefreshToken, User
+from db.models import RefreshToken, User, UserPublicKey
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,13 @@ _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-COOKIE_SAMESITE = "strict" if COOKIE_SECURE else "lax"
+_samesite_env = os.getenv("COOKIE_SAMESITE", "").strip().lower()
+if _samesite_env in ("lax", "strict", "none"):
+    COOKIE_SAMESITE = _samesite_env
+else:
+    COOKIE_SAMESITE = "strict" if COOKIE_SECURE else "lax"
+if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
+    COOKIE_SECURE = True  # browser yêu cầu Secure khi SameSite=None
 
 # Role hợp lệ trong hệ thống
 VALID_ROLES = {"owner", "recipient", "admin"}
@@ -56,7 +62,7 @@ RoleType = Literal["owner", "recipient", "admin"]
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_.\-]+$")
+    username: EmailStr
     password: str = Field(min_length=8, max_length=128)
     display_name: str | None = Field(default=None, max_length=128)
     role: RoleType = "owner"
@@ -92,6 +98,7 @@ class UserOut(BaseModel):
     display_name: str | None
     role: str
     created_at: str
+    has_public_key: bool = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -460,6 +467,76 @@ async def change_password(
 # ── Admin: quản lý users ──────────────────────────────────────────────────────
 
 
+class PublicKeyOut(BaseModel):
+    user_id: str
+    public_key_x25519: str
+    public_key_ed25519: str
+    key_version: int
+
+
+@router.get("/users/{user_id}/public-key", response_model=PublicKeyOut, tags=["users"])
+async def get_user_public_key(
+    user_id: str,
+    _: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lấy public key (X25519 + Ed25519) của một user theo internal UUID, từ DB."""
+    row = (
+        await db.execute(
+            select(UserPublicKey)
+            .where(UserPublicKey.user_id == user_id, UserPublicKey.is_active.is_(True))
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="User chưa đăng ký public key")
+    return PublicKeyOut(
+        user_id=user_id,
+        public_key_x25519=row.public_key_x25519,
+        public_key_ed25519=row.public_key_ed25519,
+        key_version=row.key_version,
+    )
+
+
+@router.get("/users/search", response_model=list[UserOut], tags=["users"])
+async def search_users(
+    q: str,
+    request: Request,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Tìm user theo email (partial match, case-insensitive).
+    Dùng khi sender chọn recipient khi upload.
+    Trả về tối đa 10 kết quả, không bao gồm chính người gọi.
+    """
+    if len(q.strip()) < 2:
+        return []
+    pattern = f"%{q.strip().lower()}%"
+    rows = (
+        await db.execute(
+            select(User)
+            .where(User.email.ilike(pattern), User.id != current.id)
+            .limit(10)
+        )
+    ).scalars().all()
+
+    user_ids = [u.id for u in rows]
+    active_key_ids: set[str] = set()
+    if user_ids:
+        key_rows = (
+            await db.execute(
+                select(UserPublicKey.user_id)
+                .where(
+                    UserPublicKey.user_id.in_(user_ids),
+                    UserPublicKey.is_active.is_(True),
+                )
+            )
+        ).scalars().all()
+        active_key_ids = set(key_rows)
+
+    return [_to_user_out(u, has_public_key=u.id in active_key_ids) for u in rows]
+
+
 @router.get("/admin/users", response_model=list[UserOut], tags=["admin"])
 async def list_users(
     request: Request,
@@ -594,11 +671,12 @@ def _require_admin(current: CurrentUser) -> None:
         raise HTTPException(status_code=403, detail="Yêu cầu quyền admin")
 
 
-def _to_user_out(u: User) -> UserOut:
+def _to_user_out(u: User, has_public_key: bool = False) -> UserOut:
     return UserOut(
         id=u.id,
         email=u.email,
         display_name=u.display_name,
         role=u.role,
         created_at=u.created_at.isoformat(),
+        has_public_key=has_public_key,
     )

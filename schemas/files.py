@@ -61,6 +61,14 @@ class RevokeRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class RecipientInfo(BaseModel):
+    recipient_id: str
+    email: Optional[str] = None
+    display_name: Optional[str] = None
+    status: str
+    granted_at: str
+
+
 class FileHistoryItem(BaseModel):
     file_id: str
     blob_name: str
@@ -71,6 +79,7 @@ class FileHistoryItem(BaseModel):
     chunk_count: int
     created_at: str
     updated_at: str
+    recipients: List[RecipientInfo] = []
 
 
 class FreshSasResponse(BaseModel):
@@ -92,4 +101,6 @@ class SharedFileResponse(BaseModel):
     wrapped_key_alg: str
     key_id: Optional[str] = None
     wrapped_key_version: int = 1
+    sender_name: Optional[str] = None
+    sender_email: Optional[str] = None
 
