@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 import uuid
 
 from azure.core.exceptions import ResourceNotFoundError
-from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +25,7 @@ from routers.token_security_router import router as token_security_router
 from routers.upload_router import router as upload_router
 from schemas.keys import KeyRecord
 from services import token_security as ts
+from services.azure_credentials import get_azure_credential
 
 logger = logging.getLogger(__name__)
 
@@ -122,13 +122,10 @@ async def jwt_access_log_middleware(request: Request, call_next):
 
 KEY_VAULT_URL = os.getenv("AZURE_KEY_VAULT_URL", "")
 
-_credential = DefaultAzureCredential()
-
-
 def get_secret_client() -> SecretClient:
     if not KEY_VAULT_URL:
         raise HTTPException(status_code=503, detail="Key Vault not configured")
-    return SecretClient(vault_url=KEY_VAULT_URL, credential=_credential)
+    return SecretClient(vault_url=KEY_VAULT_URL, credential=get_azure_credential())
 
 
 # ── Health (public) ───────────────────────────────────────────────────────────

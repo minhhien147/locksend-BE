@@ -9,18 +9,15 @@ from azure.storage.blob import (
     BlobServiceClient,
     generate_blob_sas,
 )
-from azure.identity import DefaultAzureCredential
-
+from services.azure_credentials import get_azure_credential
 
 STORAGE_ACCOUNT = os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "")
 CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "secure-files")
 
-_credential = DefaultAzureCredential()
-
 
 def get_blob_service_client() -> BlobServiceClient:
     account_url = f"https://{STORAGE_ACCOUNT}.blob.core.windows.net"
-    return BlobServiceClient(account_url=account_url, credential=_credential)
+    return BlobServiceClient(account_url=account_url, credential=get_azure_credential())
 
 
 def generate_sas_url(blob_name: str, hours: int = 24) -> Tuple[str, str]:
