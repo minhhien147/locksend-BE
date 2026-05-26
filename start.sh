@@ -1,13 +1,13 @@
 #!/usr/bin/env sh
-set -e
+# Local / manual: sh start.sh — production Railway dùng uvicorn trực tiếp (railway.json).
+PORT="${PORT:-8000}"
 
-if [ -z "${DATABASE_URL:-}" ]; then
-  echo "ERROR: DATABASE_URL is not set. Add Railway PostgreSQL and reference it on locksend-BE."
-  exit 1
+if [ -n "${DATABASE_URL:-}" ]; then
+  echo "[start] alembic upgrade head..."
+  alembic upgrade head || echo "[start] WARN: migration failed"
+else
+  echo "[start] WARN: DATABASE_URL not set — skip migration"
 fi
 
-echo "Running alembic upgrade head..."
-alembic upgrade head
-
-echo "Starting uvicorn on port ${PORT}..."
+echo "[start] uvicorn :${PORT}"
 exec uvicorn main:app --host 0.0.0.0 --port "${PORT}"
