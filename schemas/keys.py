@@ -20,6 +20,9 @@ class KeyRecord(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
     public_key_x25519: str = Field(min_length=1)
     public_key_ed25519: str = Field(min_length=1)
+    # Zero-knowledge: client mã hóa private key bằng passphrase trước khi gửi.
+    # Server chỉ lưu blob này, không bao giờ thấy private key hay passphrase.
+    encrypted_key_blob: str | None = Field(default=None)
 
     @field_validator("public_key_x25519")
     @classmethod

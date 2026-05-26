@@ -102,6 +102,9 @@ class UserPublicKey(Base):
     )
     public_key_x25519: Mapped[str] = mapped_column(Text, nullable=False)
     public_key_ed25519: Mapped[str] = mapped_column(Text, nullable=False)
+    # Zero-knowledge: server lưu private key đã mã hóa bằng passphrase client.
+    # Server KHÔNG biết passphrase hay private key plaintext.
+    encrypted_key_blob: Mapped[str | None] = mapped_column(Text, nullable=True)
     key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(

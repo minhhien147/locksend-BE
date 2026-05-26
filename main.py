@@ -142,6 +142,42 @@ def health():
 # ── Keys ──────────────────────────────────────────────────────────────────────
 
 
+@app.get("/keys/my-encrypted-blob", tags=["keys"])
+async def get_my_encrypted_blob(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Trả encrypted_key_blob của user hiện tại.
+    Zero-knowledge: server chỉ lưu blob đã mã hóa, không biết passphrase.
+    Frontend dùng endpoint này sau F5 nếu sessionStorage wrapper không còn.
+    """
+    user_row = (
+        await db.execute(select(User).where(User.external_id == current.external_id))
+    ).scalar_one_or_none()
+    if user_row is None:
+        raise HTTPException(status_code=404, detail="User không tồn tại")
+
+    krow = (
+        await db.execute(
+            select(UserPublicKey).where(
+                UserPublicKey.user_id == user_row.id,
+                UserPublicKey.is_active.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+
+    if krow is None:
+        return {"encrypted_key_blob": None, "has_keys": False}
+
+    return {
+        "encrypted_key_blob": krow.encrypted_key_blob,
+        "has_keys": True,
+        "public_key_x25519": krow.public_key_x25519,
+        "public_key_ed25519": krow.public_key_ed25519,
+    }
+
+
 @app.get("/keys/{user_id}", tags=["keys"])
 async def get_public_key(
     user_id: str,
@@ -229,6 +265,7 @@ async def store_public_key(
             user_id=user.id,
             public_key_x25519=record.public_key_x25519,
             public_key_ed25519=record.public_key_ed25519,
+            encrypted_key_blob=record.encrypted_key_blob,  # zero-knowledge blob
             key_version=new_version,
             is_active=True,
         )
