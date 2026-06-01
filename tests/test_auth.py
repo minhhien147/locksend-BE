@@ -147,6 +147,37 @@ class TestChangePassword:
         assert resp.status_code == 401
 
 
+class TestUpdateProfile:
+    async def test_update_display_name(self, client: AsyncClient, db_session: AsyncSession):
+        await _make_user(db_session, "profile@test.com", password="secret1234")
+        token = await _login(client, "profile@test.com", "secret1234")
+        resp = await client.patch(
+            "/auth/me",
+            json={"display_name": "Tên Mới"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["display_name"] == "Tên Mới"
+        hist = await client.get(
+            "/auth/me/display-name-history",
+            headers=_auth(resp.json()["access_token"]),
+        )
+        assert hist.status_code == 200
+        items = hist.json()
+        assert len(items) == 1
+        assert items[0]["new_display_name"] == "Tên Mới"
+
+    async def test_update_display_name_empty(self, client: AsyncClient, db_session: AsyncSession):
+        await _make_user(db_session, "profile2@test.com", password="secret1234")
+        token = await _login(client, "profile2@test.com", "secret1234")
+        resp = await client.patch(
+            "/auth/me",
+            json={"display_name": "   "},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 400
+
+
 # ── Protected endpoints ───────────────────────────────────────────────────────
 
 class TestProtectedEndpoints:

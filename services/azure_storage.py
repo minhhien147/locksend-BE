@@ -44,3 +44,10 @@ def _get_delegation_key(expiry: datetime):
     start = datetime.now(timezone.utc)
     return client.get_user_delegation_key(start, expiry)
 
+
+def delete_blob(blob_name: str) -> None:
+    """Xóa ciphertext trên Azure Blob (best-effort cho vault delete)."""
+    client = get_blob_service_client()
+    blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
+    blob_client.delete_blob()
+

@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import audit
 from auth import CurrentUser, JWT_ALGORITHM, _signing_key, get_current_user
 from db.dependencies import get_db
-from db.models import RefreshToken, User, UserPublicKey
+from db.models import RefreshToken, User, UserDisplayNameHistory, UserPublicKey
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,10 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class UpdateProfileRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=128)
+
+
 class UserOut(BaseModel):
     id: str
     email: str | None
@@ -99,6 +103,14 @@ class UserOut(BaseModel):
     role: str
     created_at: str
     has_public_key: bool = False
+
+
+class DisplayNameHistoryOut(BaseModel):
+    id: str
+    old_display_name: str | None
+    new_display_name: str
+    changed_at: str
+    ip_address: str | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -401,6 +413,141 @@ async def logout(
 
     _clear_refresh_cookie(response)
     return {"message": "Đã đăng xuất"}
+
+
+@router.patch("/me", response_model=TokenResponse)
+async def update_profile(
+    body: UpdateProfileRequest,
+    request: Request,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cập nhật tên hiển thị; trả access token mới (claim name trong JWT)."""
+    user = (
+        await db.execute(select(User).where(User.id == current.id))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User không tồn tại")
+
+    name = body.display_name.strip()
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Tên hiển thị không được để trống",
+        )
+
+    previous_name = user.display_name
+    if (previous_name or "").strip() == name:
+        return _token_response(user)
+
+    client_ip = audit.get_ip(request)
+    db.add(
+        UserDisplayNameHistory(
+            user_id=user.id,
+            old_display_name=previous_name,
+            new_display_name=name,
+            ip_address=client_ip,
+            user_agent=request.headers.get("User-Agent"),
+        )
+    )
+    user.display_name = name
+    await db.commit()
+
+    audit.log_event(
+        "user.display_name_changed",
+        user_id=user.id,
+        email=user.email,
+        role=user.role,
+        ip=client_ip,
+        request_id=audit.get_request_id(request),
+        old_display_name=previous_name,
+        new_display_name=name,
+    )
+    return _token_response(user)
+
+
+@router.get("/me/display-name-history", response_model=list[DisplayNameHistoryOut])
+async def get_my_display_name_history(
+    limit: int = 50,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lịch sử đổi tên hiển thị của user đang đăng nhập (mới nhất trước)."""
+    cap = min(max(limit, 1), 100)
+    rows = (
+        await db.execute(
+            select(UserDisplayNameHistory)
+            .where(UserDisplayNameHistory.user_id == current.id)
+            .order_by(UserDisplayNameHistory.changed_at.desc())
+            .limit(cap)
+        )
+    ).scalars().all()
+    return [
+        DisplayNameHistoryOut(
+            id=r.id,
+            old_display_name=r.old_display_name,
+            new_display_name=r.new_display_name,
+            changed_at=r.changed_at.isoformat(),
+            ip_address=r.ip_address,
+        )
+        for r in rows
+    ]
+
+
+@router.get(
+    "/admin/users/{user_id}/display-name-history",
+    response_model=list[DisplayNameHistoryOut],
+    tags=["admin"],
+)
+async def admin_get_display_name_history(
+    user_id: str,
+    request: Request,
+    limit: int = 50,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin xem lịch sử đổi tên của một user."""
+    _require_admin(current)
+    cap = min(max(limit, 1), 100)
+
+    user = (
+        await db.execute(
+            select(User).where(
+                (User.id == user_id) | (User.external_id == user_id)
+            )
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User không tồn tại")
+
+    rows = (
+        await db.execute(
+            select(UserDisplayNameHistory)
+            .where(UserDisplayNameHistory.user_id == user.id)
+            .order_by(UserDisplayNameHistory.changed_at.desc())
+            .limit(cap)
+        )
+    ).scalars().all()
+
+    audit.log_event(
+        "admin.view_display_name_history",
+        user_id=current.id,
+        role=current.role,
+        target_user_id=user.id,
+        ip=audit.get_ip(request),
+        request_id=audit.get_request_id(request),
+        count=len(rows),
+    )
+    return [
+        DisplayNameHistoryOut(
+            id=r.id,
+            old_display_name=r.old_display_name,
+            new_display_name=r.new_display_name,
+            changed_at=r.changed_at.isoformat(),
+            ip_address=r.ip_address,
+        )
+        for r in rows
+    ]
 
 
 @router.post("/change-password", response_model=TokenResponse)

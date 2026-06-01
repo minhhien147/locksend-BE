@@ -1,6 +1,11 @@
 import asyncio
 import os
 from logging.config import fileConfig
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -16,7 +21,9 @@ from db.models import (  # noqa: F401
     FileRecipient,
     UploadSession,
     User,
+    UserDisplayNameHistory,
     UserPublicKey,
+    VaultFolder,
 )
 
 config = context.config

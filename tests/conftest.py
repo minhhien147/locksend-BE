@@ -53,6 +53,7 @@ TEST_DB_URL = os.environ["DATABASE_URL"]
 _TABLES_TO_TRUNCATE = [
     "refresh_tokens",
     "file_recipients",
+    "vault_folders",
     "upload_sessions",
     "files",
     "user_public_keys",

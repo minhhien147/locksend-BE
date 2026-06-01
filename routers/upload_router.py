@@ -34,6 +34,7 @@ from schemas.files import (
     SharedFileResponse,
 )
 from services.azure_storage import CONTAINER_NAME, generate_sas_url, get_blob_service_client
+from services.vault_storage import assert_vault_quota, resolve_folder
 import audit
 
 
@@ -149,13 +150,24 @@ async def upload_file(
     file: UploadFile = File(...),
     metadata_json: str = Form(...),
     recipients_json: str = Form(default=None),
+    storage_mode: str = Form(default="share"),
+    folder_id: str | None = Form(default=None),
     current: CurrentUser = Depends(require_roles("owner", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Nhận ciphertext + metadata đã mã hóa client-side, upload lên Azure Blob."""
+    mode = storage_mode.strip().lower()
+    if mode not in ("share", "vault"):
+        raise HTTPException(status_code=422, detail="storage_mode phải là share hoặc vault")
+
     blob_name = f"{uuid.uuid4()}/{file.filename}"
     ciphertext = await file.read()
     file_size = len(ciphertext)
+
+    if mode == "vault":
+        await assert_vault_quota(db, current.id, file_size)
+        await resolve_folder(db, current.id, folder_id)
+        recipients_json = None
 
     ciphertext_checksum = hashlib.sha256(ciphertext).hexdigest()
 
@@ -185,8 +197,11 @@ async def upload_file(
     original_filename = meta.get("filename") or file.filename or blob_name.split("/")[-1]
     encryption_alg = meta.get("encryption_alg") or meta.get("algorithm") or "X25519+HKDF+AES-256-GCM"
 
+    meta["storage_mode"] = mode
     file_record = FileModel(
         owner_id=current.id,
+        storage_mode=mode,
+        folder_id=folder_id if mode == "vault" else None,
         blob_name=blob_name,
         original_filename=original_filename,
         content_type=file.content_type or meta.get("content_type"),
@@ -212,7 +227,7 @@ async def upload_file(
     except Exception as exc:  # pragma: no cover
         logger.warning("set_blob_metadata(file_id) failed: %s", exc)
 
-    if recipients_json:
+    if mode == "share" and recipients_json:
         try:
             recipients_data = json.loads(recipients_json)
         except json.JSONDecodeError:
@@ -451,12 +466,24 @@ async def multipart_finalize(
         body.original_filename or meta.get("filename") or blob_name.split("/")[-1]
     )
 
+    mode = (body.storage_mode or "share").strip().lower()
+    if mode not in ("share", "vault"):
+        raise HTTPException(status_code=422, detail="storage_mode phải là share hoặc vault")
+
+    file_size = body.file_size_bytes or meta.get("file_size_bytes", 0) or meta.get("fileSize", 0)
+    if mode == "vault":
+        await assert_vault_quota(db, current.id, int(file_size))
+        await resolve_folder(db, current.id, body.folder_id)
+
+    meta["storage_mode"] = mode
     file_record = FileModel(
         owner_id=current.id,
+        storage_mode=mode,
+        folder_id=body.folder_id if mode == "vault" else None,
         blob_name=blob_name,
         original_filename=original_filename,
         content_type=body.content_type or meta.get("content_type"),
-        file_size_bytes=body.file_size_bytes or meta.get("file_size_bytes", 0),
+        file_size_bytes=int(file_size),
         encryption_alg=body.encryption_alg,
         chunk_size_bytes=body.chunk_size_bytes,
         chunk_count=body.chunk_count,
@@ -465,7 +492,7 @@ async def multipart_finalize(
     db.add(file_record)
     await db.flush()
 
-    if body.recipients:
+    if mode == "share" and body.recipients:
         recipient_ids = [r.recipient_id for r in body.recipients]
         if len(recipient_ids) != len(set(recipient_ids)):
             raise HTTPException(
@@ -724,6 +751,13 @@ async def my_files(
             created_at=f.created_at.isoformat(),
             updated_at=f.updated_at.isoformat(),
             recipients=recipients_map.get(f.id, []),
+            storage_mode=f.storage_mode,
+            folder_id=f.folder_id,
+            shared_count=sum(
+                1
+                for r in recipients_map.get(f.id, [])
+                if r.status == "active"
+            ),
         )
         for f in files
     ]

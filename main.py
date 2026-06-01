@@ -14,7 +14,7 @@ from azure.core.exceptions import ResourceNotFoundError
 from azure.keyvault.secrets import SecretClient
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import CurrentUser, get_current_user, verify_jwt
@@ -23,6 +23,7 @@ from db.models import User, UserPublicKey
 from routers.auth_router import router as auth_router
 from routers.token_security_router import router as token_security_router
 from routers.upload_router import router as upload_router
+from routers.vault_router import router as vault_router
 from schemas.keys import KeyRecord
 from services import token_security as ts
 from services.azure_credentials import get_azure_credential
@@ -39,6 +40,7 @@ ALLOWED_ORIGINS = [o.strip() for o in _RAW_ORIGINS.split(",") if o.strip()]
 app.include_router(auth_router)
 app.include_router(token_security_router)
 app.include_router(upload_router)
+app.include_router(vault_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +48,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Encryption-Metadata-B64", "X-File-Id"],
 )
 
 # ── Request-ID middleware ─────────────────────────────────────────────────────
@@ -149,6 +152,26 @@ def root():
 # ── Keys ──────────────────────────────────────────────────────────────────────
 
 
+async def _latest_encrypted_blob_for_user(
+    db: AsyncSession, user_id: int, active: UserPublicKey | None
+) -> str | None:
+    """Active row first; else newest rotated row that still has a blob."""
+    if active and active.encrypted_key_blob:
+        return active.encrypted_key_blob
+    row = (
+        await db.execute(
+            select(UserPublicKey.encrypted_key_blob)
+            .where(
+                UserPublicKey.user_id == user_id,
+                UserPublicKey.encrypted_key_blob.isnot(None),
+            )
+            .order_by(desc(UserPublicKey.key_version))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return row
+
+
 @app.get("/keys/my-encrypted-blob", tags=["keys"])
 async def get_my_encrypted_blob(
     current: CurrentUser = Depends(get_current_user),
@@ -177,8 +200,12 @@ async def get_my_encrypted_blob(
     if krow is None:
         return {"encrypted_key_blob": None, "has_keys": False}
 
+    blob = await _latest_encrypted_blob_for_user(db, user_row.id, krow)
+    if blob and not krow.encrypted_key_blob:
+        krow.encrypted_key_blob = blob
+
     return {
-        "encrypted_key_blob": krow.encrypted_key_blob,
+        "encrypted_key_blob": blob,
         "has_keys": True,
         "public_key_x25519": krow.public_key_x25519,
         "public_key_ed25519": krow.public_key_ed25519,
@@ -267,12 +294,17 @@ async def store_public_key(
     else:
         new_version = 1
 
+    # Public-key-only sync must not drop the zero-knowledge blob (passphrase unlock).
+    blob = record.encrypted_key_blob
+    if not blob and existing and existing.encrypted_key_blob:
+        blob = existing.encrypted_key_blob
+
     db.add(
         UserPublicKey(
             user_id=user.id,
             public_key_x25519=record.public_key_x25519,
             public_key_ed25519=record.public_key_ed25519,
-            encrypted_key_blob=record.encrypted_key_blob,  # zero-knowledge blob
+            encrypted_key_blob=blob,
             key_version=new_version,
             is_active=True,
         )

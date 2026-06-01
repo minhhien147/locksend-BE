@@ -79,6 +79,9 @@ class User(Base):
     files: Mapped[list["File"]] = relationship(
         back_populates="owner", foreign_keys="File.owner_id"
     )
+    vault_folders: Mapped[list["VaultFolder"]] = relationship(
+        back_populates="owner", cascade="all, delete-orphan"
+    )
     received_files: Mapped[list["FileRecipient"]] = relationship(
         back_populates="recipient", foreign_keys="FileRecipient.recipient_id"
     )
@@ -88,6 +91,31 @@ class User(Base):
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    display_name_history: Mapped[list["UserDisplayNameHistory"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class UserDisplayNameHistory(Base):
+    """Audit: mỗi lần user đổi display_name qua PATCH /auth/me."""
+
+    __tablename__ = "user_display_name_history"
+    __table_args__ = (Index("ix_display_name_history_user_changed", "user_id", "changed_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    old_display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="display_name_history")
 
 
 class UserPublicKey(Base):
@@ -115,6 +143,34 @@ class UserPublicKey(Base):
     user: Mapped["User"] = relationship(back_populates="public_keys")
 
 
+class VaultFolder(Base):
+    __tablename__ = "vault_folders"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "parent_id", "name", name="uq_vault_folder_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("vault_folders.id", ondelete="CASCADE"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    owner: Mapped["User"] = relationship(back_populates="vault_folders")
+    files: Mapped[list["File"]] = relationship(back_populates="folder")
+
+
 class File(Base):
     __tablename__ = "files"
     __table_args__ = (
@@ -124,11 +180,19 @@ class File(Base):
             "chunk_size_bytes IS NULL OR chunk_size_bytes > 0",
             name="ck_files_chunk_size",
         ),
+        CheckConstraint(
+            "storage_mode IN ('share', 'vault')",
+            name="ck_files_storage_mode",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     owner_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    storage_mode: Mapped[str] = mapped_column(Text, nullable=False, default="share")
+    folder_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("vault_folders.id", ondelete="SET NULL"), nullable=True
     )
     blob_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     original_filename: Mapped[str] = mapped_column(Text, nullable=False)
@@ -157,6 +221,7 @@ class File(Base):
     recipients: Mapped[list["FileRecipient"]] = relationship(
         back_populates="file", cascade="all, delete-orphan"
     )
+    folder: Mapped["VaultFolder | None"] = relationship(back_populates="files")
 
 
 class FileRecipient(Base):
