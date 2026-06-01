@@ -136,6 +136,16 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/", tags=["ops"])
+def root():
+    return {
+        "status": "ok",
+        "service": "secure-file-sharing-backend",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
 # ── Keys ──────────────────────────────────────────────────────────────────────
 
 
