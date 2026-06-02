@@ -6,8 +6,11 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
+from azure.storage.blob import BlobClient
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,10 +33,16 @@ from schemas.files import (
     MultipartInitResponse,
     RecipientInfo,
     RevokeRequest,
+    SasCiphertextRequest,
     SasResponse,
     SharedFileResponse,
 )
-from services.azure_storage import CONTAINER_NAME, generate_sas_url, get_blob_service_client
+from services.azure_storage import (
+    CONTAINER_NAME,
+    STORAGE_ACCOUNT,
+    generate_sas_url,
+    get_blob_service_client,
+)
 from services.vault_storage import assert_vault_quota, resolve_folder
 import audit
 
@@ -674,6 +683,80 @@ async def shared_file_sas(
     )
 
 
+def _blob_name_from_sas_url(sas_url: str) -> str:
+    """Extract blob name and enforce expected storage host/container."""
+    parsed = urlparse(sas_url.strip())
+    expected_host = f"{STORAGE_ACCOUNT}.blob.core.windows.net".lower()
+    if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != expected_host:
+        raise HTTPException(status_code=422, detail="SAS URL không hợp lệ")
+
+    path_parts = [p for p in parsed.path.split("/") if p]
+    if len(path_parts) < 2:
+        raise HTTPException(status_code=422, detail="SAS URL không hợp lệ")
+    if path_parts[0] != CONTAINER_NAME:
+        raise HTTPException(status_code=422, detail="SAS URL sai container")
+    return "/".join(path_parts[1:])
+
+
+@router.post("/files/ciphertext/by-sas")
+async def download_ciphertext_by_sas(
+    body: SasCiphertextRequest,
+    current: CurrentUser = Depends(require_roles("owner", "recipient", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Proxy tải ciphertext từ SAS URL qua backend để tránh CORS ở browser.
+    Chỉ chấp nhận SAS URL thuộc storage account + container hiện tại.
+    """
+    blob_name = _blob_name_from_sas_url(body.sas_url)
+    file_row = (
+        await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))
+    ).scalar_one_or_none()
+    if file_row is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy file")
+
+    # Owner luôn được tải file của mình.
+    is_owner = file_row.owner_id == current.id
+    if not is_owner:
+        # Recipient chỉ được tải nếu đang active.
+        fr_row = (
+            await db.execute(
+                select(FileRecipient).where(
+                    FileRecipient.file_id == file_row.id,
+                    FileRecipient.recipient_id == current.id,
+                    FileRecipient.status == RecipientStatus.active,
+                )
+            )
+        ).scalar_one_or_none()
+        if fr_row is None and current.role != "admin":
+            raise HTTPException(status_code=403, detail="Bạn không có quyền tải file này")
+
+    try:
+        blob_client = BlobClient.from_blob_url(body.sas_url)
+        data = blob_client.download_blob().readall()
+        blob_meta = blob_client.get_blob_properties().metadata or {}
+    except Exception as exc:
+        logger.exception("download_ciphertext_by_sas failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Không tải được file từ storage")
+
+    metadata_b64 = blob_meta.get("encryption_metadata_b64")
+    if not metadata_b64 and file_row.metadata_json:
+        metadata_b64 = b64mod.b64encode(
+            json.dumps(file_row.metadata_json, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+
+    headers = {
+        "X-File-Id": file_row.id,
+        "Content-Disposition": f'attachment; filename="{file_row.original_filename}.enc"',
+    }
+    if metadata_b64:
+        headers["X-Encryption-Metadata-B64"] = metadata_b64
+
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers=headers,
+    )
 @router.post("/files/download-log", status_code=201)
 async def record_download_log_body(
     request: Request,

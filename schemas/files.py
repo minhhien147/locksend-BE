@@ -32,6 +32,10 @@ class DownloadLogRequest(BaseModel):
         return self
 
 
+class SasCiphertextRequest(BaseModel):
+    sas_url: str = Field(min_length=1)
+
+
 class MultipartInitResponse(BaseModel):
     blob_name: str
     upload_id: str
