@@ -122,8 +122,10 @@ def _normalize_result(result: dict[str, Any], metric: dict[str, Any]) -> dict[st
 
 
 async def _remote_health() -> dict[str, Any]:
+    # Lần đầu AI có thể đang tải model.pkl (~95MB) — cần timeout dài hơn 10s
+    health_timeout = max(LOCKSEND_AI_TIMEOUT, 120.0)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=health_timeout) as client:
             res = await client.get(f"{LOCKSEND_AI_URL}/health", headers=_auth_headers())
             res.raise_for_status()
             data = res.json()
@@ -136,7 +138,7 @@ async def _remote_health() -> dict[str, Any]:
             "mode": "remote",
             "ai_url": LOCKSEND_AI_URL,
             "error": str(exc),
-            "hint": "Kiểm tra AI service trên Ubuntu: systemctl status locksend-ai",
+            "hint": "Kiểm tra locksend-ai Online, /health → ready:true, LOCKSEND_AI_API_KEY khớp BE↔AI",
         }
 
 

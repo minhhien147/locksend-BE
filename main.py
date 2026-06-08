@@ -135,8 +135,24 @@ def get_secret_client() -> SecretClient:
 
 
 @app.get("/health", tags=["ops"])
-def health():
-    return {"status": "ok"}
+async def health():
+    from services import locksend_ai
+
+    ai = await locksend_ai.health()
+    payload: dict = {
+        "status": "ok",
+        "locksend_ai": {
+            "ready": bool(ai.get("ready")),
+            "mode": ai.get("mode", "unknown"),
+        },
+    }
+    if ai.get("ai_url"):
+        payload["locksend_ai"]["ai_url"] = ai["ai_url"]
+    if ai.get("error"):
+        payload["locksend_ai"]["error"] = ai["error"]
+    if ai.get("hint"):
+        payload["locksend_ai"]["hint"] = ai["hint"]
+    return payload
 
 
 @app.get("/", tags=["ops"])
