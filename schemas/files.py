@@ -36,6 +36,12 @@ class SasCiphertextRequest(BaseModel):
     sas_url: str = Field(min_length=1)
 
 
+class CiphertextInfoResponse(BaseModel):
+    file_id: str
+    original_filename: str
+    metadata: dict
+
+
 class MultipartInitResponse(BaseModel):
     blob_name: str
     upload_id: str

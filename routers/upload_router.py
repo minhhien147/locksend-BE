@@ -26,6 +26,7 @@ from db.models import (
     User,
 )
 from schemas.files import (
+    CiphertextInfoResponse,
     DownloadLogRequest,
     FileHistoryItem,
     FreshSasResponse,
@@ -36,6 +37,11 @@ from schemas.files import (
     SasCiphertextRequest,
     SasResponse,
     SharedFileResponse,
+)
+from services.chunk_layout import (
+    encrypted_chunk_byte_length,
+    encrypted_chunk_offset,
+    is_chunked_metadata,
 )
 from services.azure_storage import (
     CONTAINER_NAME,
@@ -683,6 +689,31 @@ async def shared_file_sas(
     )
 
 
+async def _authorize_file_download(
+    db: AsyncSession,
+    file_row: FileModel,
+    current: CurrentUser,
+) -> None:
+    """Owner, active recipient, hoặc admin được tải ciphertext."""
+    if file_row.owner_id == current.id or current.role == "admin":
+        return
+    fr_row = (
+        await db.execute(
+            select(FileRecipient).where(
+                FileRecipient.file_id == file_row.id,
+                FileRecipient.recipient_id == current.id,
+                FileRecipient.status == RecipientStatus.active,
+            )
+        )
+    ).scalar_one_or_none()
+    if fr_row is None:
+        raise HTTPException(status_code=403, detail="Bạn không có quyền tải file này")
+
+
+def _metadata_for_file(file_row: FileModel) -> dict:
+    return file_row.metadata_json if isinstance(file_row.metadata_json, dict) else {}
+
+
 def _blob_name_from_sas_url(sas_url: str) -> str:
     """Extract blob name and enforce expected storage host/container."""
     parsed = urlparse(sas_url.strip())
@@ -696,6 +727,82 @@ def _blob_name_from_sas_url(sas_url: str) -> str:
     if path_parts[0] != CONTAINER_NAME:
         raise HTTPException(status_code=422, detail="SAS URL sai container")
     return "/".join(path_parts[1:])
+
+
+@router.post("/files/ciphertext/info-by-sas", response_model=CiphertextInfoResponse)
+async def ciphertext_info_by_sas(
+    body: SasCiphertextRequest,
+    current: CurrentUser = Depends(require_roles("owner", "recipient", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trả metadata + file_id từ SAS URL — không tải blob (dùng cho download file lớn theo chunk)."""
+    blob_name = _blob_name_from_sas_url(body.sas_url)
+    file_row = (
+        await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))
+    ).scalar_one_or_none()
+    if file_row is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy file")
+
+    await _authorize_file_download(db, file_row, current)
+    metadata = _metadata_for_file(file_row)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="Không tìm thấy metadata mã hóa")
+
+    return CiphertextInfoResponse(
+        file_id=file_row.id,
+        original_filename=file_row.original_filename,
+        metadata=metadata,
+    )
+
+
+@router.get("/files/{file_id}/ciphertext/chunks/{chunk_index}")
+async def download_ciphertext_chunk(
+    file_id: str,
+    chunk_index: int,
+    current: CurrentUser = Depends(require_roles("owner", "recipient", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tải một encrypted chunk — peak RAM server ≈ 1 chunk (~64MB + tag)."""
+    if chunk_index < 0 or chunk_index > 49_999:
+        raise HTTPException(status_code=400, detail="chunk_index ngoài giới hạn (0–49999)")
+
+    file_row = (
+        await db.execute(select(FileModel).where(FileModel.id == file_id))
+    ).scalar_one_or_none()
+    if file_row is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy file")
+
+    await _authorize_file_download(db, file_row, current)
+    metadata = _metadata_for_file(file_row)
+    if not is_chunked_metadata(metadata):
+        raise HTTPException(status_code=400, detail="File không dùng chế độ chunked")
+
+    chunk_count = metadata.get("chunkCount") or metadata.get("chunk_count")
+    if chunk_index >= int(chunk_count):
+        raise HTTPException(status_code=400, detail="chunk_index vượt chunk_count")
+
+    offset = encrypted_chunk_offset(metadata, chunk_index)
+    length = encrypted_chunk_byte_length(metadata, chunk_index)
+
+    try:
+        client = get_blob_service_client()
+        blob_client = client.get_blob_client(
+            container=CONTAINER_NAME, blob=file_row.blob_name
+        )
+        data = blob_client.download_blob(offset=offset, length=length).readall()
+    except Exception as exc:
+        logger.exception("download_ciphertext_chunk failed file=%s chunk=%s: %s", file_id, chunk_index, exc)
+        raise HTTPException(status_code=502, detail="Không đọc được chunk từ storage")
+
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "X-Chunk-Index": str(chunk_index),
+            "X-Chunk-Length": str(length),
+            "X-Chunk-Offset": str(offset),
+        },
+    )
 
 
 @router.post("/files/ciphertext/by-sas")
@@ -715,21 +822,7 @@ async def download_ciphertext_by_sas(
     if file_row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy file")
 
-    # Owner luôn được tải file của mình.
-    is_owner = file_row.owner_id == current.id
-    if not is_owner:
-        # Recipient chỉ được tải nếu đang active.
-        fr_row = (
-            await db.execute(
-                select(FileRecipient).where(
-                    FileRecipient.file_id == file_row.id,
-                    FileRecipient.recipient_id == current.id,
-                    FileRecipient.status == RecipientStatus.active,
-                )
-            )
-        ).scalar_one_or_none()
-        if fr_row is None and current.role != "admin":
-            raise HTTPException(status_code=403, detail="Bạn không có quyền tải file này")
+    await _authorize_file_download(db, file_row, current)
 
     try:
         blob_client = BlobClient.from_blob_url(body.sas_url)
