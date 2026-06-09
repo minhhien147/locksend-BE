@@ -12,6 +12,11 @@ Endpoints:
   POST /cleanup               - xóa expired records cũ
   POST /adaptive-renewal      - đề xuất TTL mới theo risk level
   GET  /ai/health             - kiểm tra LockSend AI model
+  GET  /ai/trends             - biểu đồ trend 7–30 ngày
+  GET  /alerts                - cảnh báo AI realtime
+  POST /alerts/{id}/read      - đánh dấu đã đọc
+  GET  /files/activity        - thống kê upload/download theo file
+  GET  /files/{file_id}/activity - chi tiết hoạt động 1 file
   POST /ai/analyze            - phân tích toàn bộ token bằng LockSend AI
   POST /ai/analyze/token      - phân tích 1 token bằng LockSend AI
 """
@@ -27,7 +32,7 @@ from pydantic import BaseModel, Field
 import audit
 from auth import CurrentUser, get_current_user
 from db.dependencies import get_db
-from services import locksend_ai, token_security
+from services import ai_realtime, file_activity, locksend_ai, token_security
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -358,6 +363,9 @@ async def ai_analyze(
 
     try:
         ai_results = await locksend_ai.analyze_batch(top_metrics)
+        for metric, result in zip(top_metrics, ai_results):
+            if result and not result.get("error"):
+                await ai_realtime.save_manual_snapshot(db, metric, result)
     except RuntimeError as exc:
         ai_error = str(exc)
         logger.info("LockSend AI skipped: %s", exc)
@@ -410,8 +418,95 @@ async def ai_analyze_single(
     except RuntimeError as exc:
         ai_error = str(exc)
 
+    if ai_result and not ai_error:
+        await ai_realtime.save_manual_snapshot(db, token_data, ai_result)
+
     return {
         "token_metrics": token_data,
         "ai": ai_result,
         "ai_error": ai_error,
     }
+
+
+@router.get("/alerts")
+async def list_security_alerts(
+    unread_only: bool = Query(default=False),
+    limit: int = Query(default=30, ge=1, le=100),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cảnh báo AI realtime (admin)."""
+    _require_admin(current)
+    alerts = await ai_realtime.list_alerts(db, unread_only=unread_only, limit=limit)
+    unread = await ai_realtime.unread_alert_count(db)
+    return {"alerts": alerts, "unread_count": unread}
+
+
+@router.post("/alerts/{alert_id}/read")
+async def read_security_alert(
+    alert_id: str,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_admin(current)
+    ok = await ai_realtime.mark_alert_read(db, alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh báo")
+    return {"ok": True}
+
+
+@router.post("/alerts/read-all")
+async def read_all_security_alerts(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_admin(current)
+    n = await ai_realtime.mark_all_alerts_read(db)
+    return {"marked": n}
+
+
+@router.get("/ai/trends")
+async def ai_security_trends(
+    days: int = Query(default=7, ge=1, le=30),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Biểu đồ trend: access, cảnh báo AI, score cao, Rule≠AI."""
+    _require_admin(current)
+    return await ai_realtime.build_trends(db, days=days)
+
+
+@router.get("/files/activity")
+async def file_activity_overview(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=30),
+    limit: int = Query(default=20, ge=1, le=50),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Top file theo lượt tải, IP, SAS link và trend upload/download."""
+    _require_admin(current)
+    data = await file_activity.build_file_overview(db, days=days, limit=limit)
+    audit.log_event(
+        "admin.token_security.file_activity",
+        user_id=current.id,
+        role=current.role,
+        days=days,
+        request_id=audit.get_request_id(request),
+    )
+    return data
+
+
+@router.get("/files/{file_id}/activity")
+async def file_activity_detail(
+    file_id: str,
+    days: int = Query(default=7, ge=1, le=30),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Chi tiết hoạt động một file (download gần đây, cảnh báo AI)."""
+    _require_admin(current)
+    detail = await file_activity.get_file_detail(db, file_id, days=days)
+    if not detail:
+        raise HTTPException(status_code=404, detail="File không tìm thấy")
+    return detail

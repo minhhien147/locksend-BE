@@ -21,6 +21,8 @@ from typing import Any
 
 import httpx
 
+from services.ai_explain import enrich_ai_result
+
 logger = logging.getLogger(__name__)
 
 LOCKSEND_AI_URL = os.getenv("LOCKSEND_AI_URL", "").rstrip("/")
@@ -108,7 +110,7 @@ def _token_metric_to_cic(metric: dict[str, Any]) -> dict[str, float]:
 def _normalize_result(result: dict[str, Any], metric: dict[str, Any]) -> dict[str, Any]:
     risk_raw: float = float(result["risk_score"])
     ai_level: str = str(result["risk_level"])
-    return {
+    base = {
         "risk_score_pct": round(risk_raw * 100),
         "risk_score_raw": risk_raw,
         "risk_level": _LEVEL_MAP.get(ai_level, "medium"),
@@ -119,6 +121,7 @@ def _normalize_result(result: dict[str, Any], metric: dict[str, Any]) -> dict[st
         "token_id": metric.get("token_id"),
         "token_type": metric.get("token_type"),
     }
+    return enrich_ai_result(base, metric)
 
 
 async def _remote_health() -> dict[str, Any]:

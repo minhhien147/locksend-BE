@@ -372,7 +372,6 @@ class UploadLog(Base):
     )
 
     user: Mapped["User | None"] = relationship()
-    file: Mapped["File | None"] = relationship()
 
 
 class DownloadLog(Base):
@@ -482,6 +481,70 @@ class TokenAccessLog(Base):
     http_method: Mapped[str | None] = mapped_column(Text, nullable=True)
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     country_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User | None"] = relationship()
+
+
+class TokenSecurityAlert(Base):
+    """Cảnh báo AI realtime khi token được sử dụng bất thường."""
+    __tablename__ = "token_security_alerts"
+    __table_args__ = (
+        Index("ix_tsa_created_at", "created_at"),
+        Index("ix_tsa_is_read", "is_read"),
+        Index("ix_tsa_token_ref", "token_ref"),
+        Index("ix_tsa_file_id", "file_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    token_type: Mapped[str] = mapped_column(Text, nullable=False)
+    token_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    file_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("files.id", ondelete="SET NULL"), nullable=True
+    )
+    file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subject_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rule_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_score_pct: Mapped[int] = mapped_column(Integer, nullable=False)
+    ai_level: Mapped[str] = mapped_column(Text, nullable=False)
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    agreement_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    behavior_badges: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_vi: Mapped[str | None] = mapped_column(Text, nullable=True)
+    endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User | None"] = relationship()
+
+
+class TokenAiScoreSnapshot(Base):
+    """Lịch sử AI score — dùng cho biểu đồ trend."""
+    __tablename__ = "token_ai_score_snapshots"
+    __table_args__ = (
+        Index("ix_tass_created_at", "created_at"),
+        Index("ix_tass_token_ref", "token_ref"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    token_type: Mapped[str] = mapped_column(Text, nullable=False)
+    token_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    rule_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_score_pct: Mapped[int] = mapped_column(Integer, nullable=False)
+    ai_level: Mapped[str] = mapped_column(Text, nullable=False)
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="realtime")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

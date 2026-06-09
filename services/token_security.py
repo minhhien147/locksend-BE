@@ -316,6 +316,7 @@ async def get_sas_token_metrics(
             "token_id": rec.token_id,
             "token_type": "sas",
             "db_id": rec.id,
+            "file_id": rec.file_id,
             "blob_name": rec.blob_name,
             "user_id": rec.user_id,
             "ip_address": rec.ip_address,
@@ -643,6 +644,15 @@ async def track_sas_issue(
         endpoint=endpoint,
         http_method=http_method,
         status_code=200,
+    )
+    from services.ai_realtime import schedule_token_access_scan
+
+    schedule_token_access_scan(
+        token_type="sas",
+        token_ref=token_id,
+        user_id=user_id,
+        endpoint=endpoint,
+        ip_address=ip_address,
     )
     return token_id
 

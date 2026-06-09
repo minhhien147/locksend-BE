@@ -117,6 +117,17 @@ async def jwt_access_log_middleware(request: Request, call_next):
                 http_method=request.method,
                 status_code=response.status_code,
             )
+
+        if user_id and response.status_code < 500:
+            from services.ai_realtime import schedule_token_access_scan
+
+            schedule_token_access_scan(
+                token_type="jwt",
+                token_ref=token_ref,
+                user_id=user_id,
+                endpoint=path,
+                ip_address=ip,
+            )
     except Exception:
         pass
 
