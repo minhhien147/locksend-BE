@@ -34,7 +34,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import audit
 from auth import CurrentUser, JWT_ALGORITHM, _signing_key, get_current_user
 from db.dependencies import get_db
-from db.models import RefreshToken, User, UserDisplayNameHistory, UserPublicKey
+from db.models import RefreshToken, User, UserDisplayNameHistory, UserPublicKey, UserSecurityAlert
+from schemas.user_security import MarkAlertReadRequest, UserSecurityAlertOut, UserSecurityAlertsResponse
+from services import email_verification, google_oauth, owner_security
+from services.user_email import is_valid_alert_email, normalize_email
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +72,17 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=1)
+    username: EmailStr
     password: str = Field(min_length=1)
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str = Field(min_length=10)
+
+
+class GoogleOAuthConfigResponse(BaseModel):
+    enabled: bool
+    client_id: str = ""
 
 
 class TokenResponse(BaseModel):
@@ -81,6 +93,18 @@ class TokenResponse(BaseModel):
     email: str
     display_name: str | None
     role: RoleType
+    email_verified: bool = True
+
+
+class VerifyEmailRequest(BaseModel):
+    code: str = Field(min_length=4, max_length=8)
+
+
+class VerificationStatusResponse(BaseModel):
+    email_verified: bool
+    email: str | None
+    verification_required: bool
+    resend_cooldown_sec: int = 0
 
 
 class ChangeRoleRequest(BaseModel):
@@ -94,6 +118,10 @@ class ChangePasswordRequest(BaseModel):
 
 class UpdateProfileRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=128)
+
+
+class UpdateEmailRequest(BaseModel):
+    email: EmailStr
 
 
 class UserOut(BaseModel):
@@ -199,9 +227,10 @@ def _token_response(user: User) -> TokenResponse:
         access_token=_create_access_token(user),
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user_id=user.id,
-        email=user.email,
+        email=user.email or "",
         display_name=user.display_name,
         role=user.role,
+        email_verified=email_verification.is_user_email_verified(user),
     )
 
 
@@ -229,15 +258,22 @@ async def register(
             detail="Tên đăng nhập đã được sử dụng",
         )
 
+    email = normalize_email(str(body.username))
     user = User(
         external_id=str(_uuid_mod.uuid4()),
-        email=body.username,
-        display_name=body.display_name or body.username,
+        email=email,
+        display_name=body.display_name or email,
         role="owner",
         password_hash=_hash_password(body.password),
+        email_verified_at=None,
     )
     db.add(user)
     await db.flush()
+
+    try:
+        await email_verification.issue_verification_challenge(db, user, email=email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     jti, expires_at = await _issue_refresh_token(db, user, request)
     await db.commit()
@@ -254,6 +290,88 @@ async def register(
     return _token_response(user)
 
 
+@router.get("/google/config", response_model=GoogleOAuthConfigResponse)
+async def google_oauth_config():
+    """Cấu hình public cho nút Đăng nhập bằng Google (frontend)."""
+    cfg = google_oauth.public_config()
+    return GoogleOAuthConfigResponse(
+        enabled=bool(cfg["enabled"]),
+        client_id=str(cfg.get("client_id") or ""),
+    )
+
+
+async def _get_or_create_google_user(
+    db: AsyncSession,
+    info: google_oauth.GoogleUserInfo,
+) -> User:
+    ext_id = google_oauth.google_external_id(info.sub)
+
+    user = (
+        await db.execute(select(User).where(User.external_id == ext_id))
+    ).scalar_one_or_none()
+    if user:
+        return user
+
+    user = (
+        await db.execute(select(User).where(User.email == info.email))
+    ).scalar_one_or_none()
+    if user:
+        if info.name and not user.display_name:
+            user.display_name = info.name
+        return user
+
+    user = User(
+        external_id=ext_id,
+        email=info.email,
+        display_name=info.name or info.email,
+        role="owner",
+        password_hash=None,
+    )
+    db.add(user)
+    await db.flush()
+    return user
+
+
+@router.post("/google", response_model=TokenResponse)
+async def google_login(
+    body: GoogleLoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Đăng nhập / đăng ký bằng Google ID token từ frontend."""
+    if not google_oauth.is_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Đăng nhập Google chưa được bật",
+        )
+
+    try:
+        info = await google_oauth.verify_id_token(body.credential)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        ) from exc
+
+    user = await _get_or_create_google_user(db, info)
+    await email_verification.mark_email_verified(db, user)
+    jti, expires_at = await _issue_refresh_token(db, user, request)
+    await owner_security.sync_keypair_expiry_alerts(db, user.id)
+    await db.commit()
+    _set_refresh_cookie(response, jti, expires_at)
+
+    audit.log_event(
+        "user.login.google",
+        user_id=user.id,
+        email=user.email,
+        role=user.role,
+        ip=audit.get_ip(request),
+        request_id=audit.get_request_id(request),
+    )
+    return _token_response(user)
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
     body: LoginRequest,
@@ -261,23 +379,25 @@ async def login(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    """Đăng nhập, trả access_token + set refresh_token cookie."""
+    """Đăng nhập bằng email + mật khẩu."""
+    email = normalize_email(str(body.username))
     user = (
-        await db.execute(select(User).where(User.email == body.username))
+        await db.execute(select(User).where(User.email == email))
     ).scalar_one_or_none()
 
     if user is None or not user.password_hash:
-        raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không đúng")
+        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
     if not _verify_password(body.password, user.password_hash):
         audit.log_event(
             "user.login.failed",
-            username=body.username,
+            username=email,
             ip=audit.get_ip(request),
             request_id=audit.get_request_id(request),
         )
-        raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không đúng")
+        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
 
     jti, expires_at = await _issue_refresh_token(db, user, request)
+    await owner_security.sync_keypair_expiry_alerts(db, user.id)
     await db.commit()
     _set_refresh_cookie(response, jti, expires_at)
 
@@ -413,6 +533,129 @@ async def logout(
 
     _clear_refresh_cookie(response)
     return {"message": "Đã đăng xuất"}
+
+
+@router.patch("/me/email", response_model=TokenResponse)
+async def update_email(
+    body: UpdateEmailRequest,
+    request: Request,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cập nhật email nhận cảnh báo bảo mật (phải là địa chỉ email hợp lệ)."""
+    user = (
+        await db.execute(select(User).where(User.id == current.id))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User không tồn tại")
+
+    new_email = normalize_email(str(body.email))
+    if not is_valid_alert_email(new_email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email không hợp lệ",
+        )
+
+    if (user.email or "").strip().lower() == new_email:
+        return _token_response(user)
+
+    existing = (
+        await db.execute(
+            select(User).where(User.email == new_email, User.id != user.id)
+        )
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email đã được sử dụng bởi tài khoản khác",
+        )
+
+    user.email = new_email
+    user.email_verified_at = None
+    try:
+        await email_verification.issue_verification_challenge(db, user, email=new_email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+
+    audit.log_event(
+        "user.email_changed",
+        user_id=user.id,
+        role=user.role,
+        ip=audit.get_ip(request),
+        request_id=audit.get_request_id(request),
+    )
+    return _token_response(user)
+
+
+@router.get("/me/verification-status", response_model=VerificationStatusResponse)
+async def verification_status(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trạng thái xác minh email + cooldown gửi lại OTP."""
+    user = (
+        await db.execute(select(User).where(User.id == current.id))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User không tồn tại")
+    return VerificationStatusResponse(
+        email_verified=email_verification.is_user_email_verified(user),
+        email=user.email,
+        verification_required=email_verification.verification_required(),
+        resend_cooldown_sec=await email_verification.resend_cooldown_remaining(
+            db, user.id
+        ),
+    )
+
+
+@router.post("/verify-email", response_model=TokenResponse)
+async def verify_email(
+    body: VerifyEmailRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Xác minh email bằng mã OTP 6 số."""
+    user = (
+        await db.execute(select(User).where(User.id == current.id))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User không tồn tại")
+
+    if email_verification.is_user_email_verified(user):
+        return _token_response(user)
+
+    ok = await email_verification.verify_otp(db, user, body.code)
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="Mã xác minh không đúng hoặc đã hết hạn",
+        )
+    await db.commit()
+    return _token_response(user)
+
+
+@router.post("/resend-verification")
+async def resend_verification(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Gửi lại mã OTP xác minh email."""
+    user = (
+        await db.execute(select(User).where(User.id == current.id))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User không tồn tại")
+
+    if email_verification.is_user_email_verified(user):
+        return {"status": "already_verified"}
+
+    try:
+        await email_verification.issue_verification_challenge(db, user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return {"status": "sent"}
 
 
 @router.patch("/me", response_model=TokenResponse)
@@ -808,6 +1051,53 @@ async def delete_user(
         target_user_id=user_id,
         request_id=audit.get_request_id(request),
     )
+
+
+@router.get("/me/security-alerts", response_model=UserSecurityAlertsResponse)
+async def my_security_alerts(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 20,
+    unread_only: bool = False,
+):
+    """Cảnh báo bảo mật cho user (IP bất thường, keypair hết hạn, …)."""
+    await owner_security.sync_keypair_expiry_alerts(db, current.id)
+    rows, unread = await owner_security.list_user_alerts(
+        db, current.id, limit=limit, unread_only=unread_only
+    )
+    return UserSecurityAlertsResponse(
+        alerts=[
+            UserSecurityAlertOut(
+                id=a.id,
+                alert_type=a.alert_type,
+                file_id=a.file_id,
+                file_name=a.file_name,
+                title_vi=a.title_vi,
+                message_vi=a.message_vi,
+                detail_json=a.detail_json,
+                is_read=a.is_read,
+                created_at=a.created_at,
+            )
+            for a in rows
+        ],
+        unread_count=unread,
+    )
+
+
+@router.patch("/me/security-alerts/read")
+async def mark_security_alerts_read(
+    body: MarkAlertReadRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Đánh dấu cảnh báo đã đọc (để trống alert_ids = đọc tất cả)."""
+    q = select(UserSecurityAlert).where(UserSecurityAlert.user_id == current.id)
+    if body.alert_ids:
+        q = q.where(UserSecurityAlert.id.in_(body.alert_ids))
+    rows = (await db.execute(q)).scalars().all()
+    for row in rows:
+        row.is_read = True
+    return {"marked": len(rows)}
 
 
 # ── Helpers nội bộ ─────────────────────────────────────────────────────────────

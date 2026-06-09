@@ -5,6 +5,13 @@ Phase 1: JWT auth + RBAC bảo vệ tất cả endpoint nhạy cảm.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env trước mọi import đọc os.getenv (integrations, DB, …)
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 import logging
 import os
 from datetime import datetime, timezone
@@ -17,10 +24,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth import CurrentUser, get_current_user, verify_jwt
+from auth import CurrentUser, get_current_user, require_verified_email, verify_jwt
 from db.dependencies import get_db, get_db_context
 from db.models import User, UserPublicKey
+from services import owner_security
+from services.owner_security import keypair_expires_at_from_now
 from routers.auth_router import router as auth_router
+from routers.integrations_router import router as integrations_router
 from routers.token_security_router import router as token_security_router
 from routers.upload_router import router as upload_router
 from routers.vault_router import router as vault_router
@@ -38,6 +48,7 @@ _RAW_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _RAW_ORIGINS.split(",") if o.strip()]
 
 app.include_router(auth_router)
+app.include_router(integrations_router)
 app.include_router(token_security_router)
 app.include_router(upload_router)
 app.include_router(vault_router)
@@ -201,7 +212,7 @@ async def _latest_encrypted_blob_for_user(
 
 @app.get("/keys/my-encrypted-blob", tags=["keys"])
 async def get_my_encrypted_blob(
-    current: CurrentUser = Depends(get_current_user),
+    current: CurrentUser = Depends(require_verified_email),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -227,6 +238,9 @@ async def get_my_encrypted_blob(
     if krow is None:
         return {"encrypted_key_blob": None, "has_keys": False}
 
+    await owner_security.sync_keypair_expiry_alerts(db, user_row.id)
+    kp = owner_security.keypair_status(krow)
+
     blob = await _latest_encrypted_blob_for_user(db, user_row.id, krow)
     if blob and not krow.encrypted_key_blob:
         krow.encrypted_key_blob = blob
@@ -236,13 +250,18 @@ async def get_my_encrypted_blob(
         "has_keys": True,
         "public_key_x25519": krow.public_key_x25519,
         "public_key_ed25519": krow.public_key_ed25519,
+        "keypair_expires_at": kp.get("expires_at"),
+        "keypair_days_left": kp.get("days_left"),
+        "keypair_expired": kp.get("expired", False),
+        "keypair_expiring_soon": kp.get("expiring_soon", False),
+        "key_version": kp.get("key_version"),
     }
 
 
 @app.get("/keys/{user_id}", tags=["keys"])
 async def get_public_key(
     user_id: str,
-    _: CurrentUser = Depends(get_current_user),
+    _: CurrentUser = Depends(require_verified_email),
     db: AsyncSession = Depends(get_db),
 ):
     """Lấy public key của user từ DB (fallback từ Key Vault nếu có)."""
@@ -282,7 +301,7 @@ async def get_public_key(
 @app.post("/keys", status_code=201, tags=["keys"])
 async def store_public_key(
     record: KeyRecord,
-    current: CurrentUser = Depends(get_current_user),
+    current: CurrentUser = Depends(require_verified_email),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -334,8 +353,10 @@ async def store_public_key(
             encrypted_key_blob=blob,
             key_version=new_version,
             is_active=True,
+            expires_at=keypair_expires_at_from_now(),
         )
     )
+    await owner_security.sync_keypair_expiry_alerts(db, user.id)
     logger.info("Public key stored for user %s (version %d)", user.id, new_version)
     return {"status": "stored", "user_id": record.user_id}
 

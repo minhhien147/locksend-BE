@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import audit
-from auth import CurrentUser, require_roles
+from auth import CurrentUser, require_roles, require_verified_email
 from db.dependencies import get_db
 from db.models import File as FileModel
 from db.models import FileRecipient, RecipientStatus, VaultFolder
@@ -35,7 +35,7 @@ from services.vault_storage import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["vault"])
+router = APIRouter(tags=["vault"], dependencies=[Depends(require_verified_email)])
 
 
 def _shared_count(recipients: list) -> int:

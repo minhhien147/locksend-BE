@@ -63,6 +63,9 @@ class User(Base):
     display_name: Mapped[str | None] = mapped_column(Text)
     role: Mapped[str] = mapped_column(Text, nullable=False, default="owner")
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -95,6 +98,34 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    security_alerts: Mapped[list["UserSecurityAlert"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    email_verification_codes: Mapped[list["EmailVerificationCode"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class EmailVerificationCode(Base):
+    """OTP xác minh email — 6 chữ số, hết hạn sau vài phút."""
+
+    __tablename__ = "email_verification_codes"
+    __table_args__ = (Index("ix_evc_user_created", "user_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    code_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="email_verification_codes")
 
 
 class UserDisplayNameHistory(Base):
@@ -139,6 +170,7 @@ class UserPublicKey(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped["User"] = relationship(back_populates="public_keys")
 
@@ -550,3 +582,34 @@ class TokenAiScoreSnapshot(Base):
     )
 
     user: Mapped["User | None"] = relationship()
+
+
+class UserSecurityAlert(Base):
+    """Cảnh báo bảo mật gửi tới owner/recipient — IP bất thường, keypair hết hạn, …"""
+
+    __tablename__ = "user_security_alerts"
+    __table_args__ = (
+        Index("ix_usa_user_created", "user_id", "created_at"),
+        Index("ix_usa_user_unread", "user_id", "is_read"),
+        Index("ix_usa_dedupe", "dedupe_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    alert_type: Mapped[str] = mapped_column(Text, nullable=False)
+    file_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("files.id", ondelete="SET NULL"), nullable=True
+    )
+    file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_vi: Mapped[str] = mapped_column(Text, nullable=False)
+    message_vi: Mapped[str] = mapped_column(Text, nullable=False)
+    detail_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    dedupe_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="security_alerts")

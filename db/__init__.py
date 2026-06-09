@@ -10,6 +10,7 @@ from .models import (
     UploadSession,
     User,
     UserPublicKey,
+    UserSecurityAlert,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "TokenAccessLog",
     "TokenSecurityAlert",
     "TokenAiScoreSnapshot",
+    "UserSecurityAlert",
 ]

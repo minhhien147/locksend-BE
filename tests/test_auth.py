@@ -99,6 +99,13 @@ class TestLogin:
         })
         assert resp.status_code == 401
 
+    async def test_login_rejects_non_email_username(self, client: AsyncClient):
+        resp = await client.post("/auth/login", json={
+            "username": "admin",
+            "password": "password123",
+        })
+        assert resp.status_code == 422
+
     async def test_login_returns_correct_role(self, client: AsyncClient, db_session: AsyncSession):
         await _make_user(db_session, "adminuser@test.com", role="admin")
         resp = await client.post("/auth/login", json={

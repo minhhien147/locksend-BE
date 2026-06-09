@@ -14,7 +14,7 @@ from fastapi.responses import Response
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth import CurrentUser, require_roles
+from auth import CurrentUser, require_roles, require_verified_email
 from db.dependencies import get_db
 from db.models import File as FileModel
 from db.models import (
@@ -102,7 +102,7 @@ async def _generate_and_track_sas(
     return sas_url, expires_at
 
 
-router = APIRouter(tags=["upload"])
+router = APIRouter(tags=["upload"], dependencies=[Depends(require_verified_email)])
 
 
 async def _persist_download_log(
@@ -149,6 +149,11 @@ async def _persist_download_log(
             user_agent=request.headers.get("user-agent"),
         )
     )
+    await db.flush()
+    if fid_logged:
+        from services import owner_security
+
+        await owner_security.maybe_alert_multi_ip_access(db, fid_logged)
     audit.log_event(
         "file.download",
         user_id=current.id,

@@ -32,8 +32,10 @@ from pydantic import BaseModel, Field
 import audit
 from auth import CurrentUser, get_current_user
 from db.dependencies import get_db
-from services import ai_realtime, file_activity, locksend_ai, token_security
+from services import ai_realtime, file_activity, locksend_ai, owner_security, token_security
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
 
@@ -510,3 +512,66 @@ async def file_activity_detail(
     if not detail:
         raise HTTPException(status_code=404, detail="File không tìm thấy")
     return detail
+
+
+@router.post("/files/{file_id}/notify-owner")
+async def notify_file_owner(
+    file_id: str,
+    request: Request,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin gửi cảnh báo tới owner file (IP bất thường / rủi ro SAS)."""
+    _require_admin(current)
+    from db.models import File
+
+    from db.models import User
+    from services import email_service
+    from services.user_email import is_valid_alert_email
+
+    file_row = (
+        await db.execute(
+            select(File).where(File.id == file_id).options(selectinload(File.owner))
+        )
+    ).scalar_one_or_none()
+    if not file_row:
+        raise HTTPException(status_code=404, detail="File không tìm thấy")
+
+    owner = file_row.owner
+    if owner is None and file_row.owner_id:
+        owner = (
+            await db.execute(select(User).where(User.id == file_row.owner_id))
+        ).scalar_one_or_none()
+
+    email_sent = False
+    if email_service.is_configured():
+        if not owner or not is_valid_alert_email(owner.email):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Owner chưa có email hợp lệ để nhận cảnh báo qua mail. "
+                    "Yêu cầu owner cập nhật email trong trang Hồ sơ."
+                ),
+            )
+        email_sent = True
+
+    alert = await owner_security.maybe_alert_multi_ip_access(
+        db, file_id, force=True, triggered_by="admin"
+    )
+    if alert is None:
+        raise HTTPException(status_code=500, detail="Không tạo được cảnh báo")
+    audit.log_event(
+        "admin.token_security.notify_owner",
+        user_id=current.id,
+        role=current.role,
+        file_id=file_id,
+        alert_id=alert.id,
+        request_id=audit.get_request_id(request),
+    )
+    return {
+        "status": "sent",
+        "alert_id": alert.id,
+        "owner_user_id": alert.user_id,
+        "owner_email": owner.email if owner else None,
+        "email_sent": email_sent,
+    }

@@ -112,6 +112,7 @@ class CurrentUser:
         self.external_id: str = user.external_id
         self.email: str | None = user.email
         self.role: str = user.role
+        self.email_verified: bool = user.email_verified_at is not None
         self.payload = payload
 
     def __repr__(self) -> str:
@@ -194,3 +195,17 @@ def require_roles(*roles: str):
         return current
 
     return _check
+
+
+async def require_verified_email(
+    current: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    """Chặn thao tác nhạy cảm khi email chưa xác minh OTP."""
+    from services.email_verification import is_user_email_verified, verification_required
+
+    if verification_required() and not is_user_email_verified(current.user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="EMAIL_NOT_VERIFIED",
+        )
+    return current

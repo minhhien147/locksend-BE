@@ -38,4 +38,6 @@ urllib3==2.6.3
 sqlalchemy[asyncio]==2.0.41
 uvicorn==0.42.0
 python-dotenv
+# Gmail OAuth2 (chỉ cần khi EMAIL_BACKEND=gmail_oauth2): pip install google-auth
+# google-auth==2.40.3
 # LockSend AI (sklearn/shap): pip install -r requirements-ai.txt — hoặc set LOCKSEND_AI_URL trên Railway

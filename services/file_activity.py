@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from db.models import DownloadLog, File, SasTokenRecord, TokenSecurityAlert, UploadLog
+from services.owner_security import MULTI_IP_ALERT_THRESHOLD
+from services.user_email import is_valid_alert_email
 
-SUSPICIOUS_MIN_DOWNLOADS = 5
-SUSPICIOUS_MIN_IPS = 3
+SUSPICIOUS_MIN_IPS = MULTI_IP_ALERT_THRESHOLD
 
 
 def _utc_now() -> datetime:
@@ -82,9 +83,11 @@ async def build_file_overview(db: AsyncSession, *, days: int = 7, limit: int = 2
             )
         ).scalars().all()
         for f in files:
+            owner_email = f.owner.email if f.owner else None
             owners[f.id] = {
                 "owner_id": f.owner_id,
-                "owner_email": f.owner.email if f.owner else None,
+                "owner_email": owner_email,
+                "owner_email_valid": is_valid_alert_email(owner_email),
                 "storage_mode": f.storage_mode,
             }
 
@@ -124,7 +127,7 @@ async def build_file_overview(db: AsyncSession, *, days: int = 7, limit: int = 2
         fid = row.file_id
         downloads = int(row.downloads)
         unique_ips = int(row.unique_ips or 0)
-        suspicious = downloads >= SUSPICIOUS_MIN_DOWNLOADS and unique_ips >= SUSPICIOUS_MIN_IPS
+        suspicious = unique_ips > SUSPICIOUS_MIN_IPS
         owner = owners.get(fid or "", {})
         top_files.append({
             "file_id": fid,
@@ -136,6 +139,7 @@ async def build_file_overview(db: AsyncSession, *, days: int = 7, limit: int = 2
             "ai_alerts": alert_by_file.get(fid, 0),
             "suspicious": suspicious,
             "owner_email": owner.get("owner_email"),
+            "owner_email_valid": owner.get("owner_email_valid", False),
             "owner_id": owner.get("owner_id"),
             "storage_mode": owner.get("storage_mode"),
         })
@@ -234,6 +238,9 @@ async def get_file_detail(db: AsyncSession, file_id: str, *, days: int = 7) -> d
         "file_id": file_id,
         "file_name": file_row.original_filename,
         "owner_email": file_row.owner.email if file_row.owner else None,
+        "owner_email_valid": is_valid_alert_email(
+            file_row.owner.email if file_row.owner else None
+        ),
         "owner_id": file_row.owner_id,
         "storage_mode": file_row.storage_mode,
         "file_size_bytes": file_row.file_size_bytes,
@@ -243,7 +250,7 @@ async def get_file_detail(db: AsyncSession, file_id: str, *, days: int = 7) -> d
             "uploads": len(uploads),
             "unique_ips": unique_ips,
             "active_sas_links": int(sas_active),
-            "suspicious": len(downloads) >= SUSPICIOUS_MIN_DOWNLOADS and unique_ips >= SUSPICIOUS_MIN_IPS,
+            "suspicious": unique_ips > SUSPICIOUS_MIN_IPS,
         },
         "recent_downloads": [
             {

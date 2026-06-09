@@ -51,6 +51,7 @@ from main import app  # noqa: E402
 TEST_DB_URL = os.environ["DATABASE_URL"]
 
 _TABLES_TO_TRUNCATE = [
+    "email_verification_codes",
     "refresh_tokens",
     "file_recipients",
     "vault_folders",
