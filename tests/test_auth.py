@@ -16,6 +16,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.conftest import _auth, _login, _make_user
+from tests.test_share import _make_file, _share
 
 
 # ── Register ──────────────────────────────────────────────────────────────────
@@ -309,3 +310,38 @@ class TestRBAC:
             headers=_auth(token),
         )
         assert resp.status_code == 400
+
+    async def test_admin_delete_user_who_is_recipient(
+        self, client: AsyncClient, db_session: AsyncSession
+    ):
+        """User được chia sẻ file của người khác vẫn xóa được."""
+        admin = await _make_user(db_session, "boss2@test.com", role="admin")
+        owner = await _make_user(db_session, "owner2@test.com", role="owner")
+        victim = await _make_user(db_session, "shared@test.com", role="recipient")
+        file = await _make_file(db_session, owner.id)
+        await _share(db_session, file.id, victim.id)
+        token = await _login(client, "boss2@test.com")
+
+        resp = await client.delete(
+            f"/auth/admin/users/{victim.id}",
+            headers=_auth(token),
+        )
+        assert resp.status_code == 204
+
+    async def test_admin_delete_user_with_owned_files_and_shares(
+        self, client: AsyncClient, db_session: AsyncSession
+    ):
+        """User vừa sở hữu file vừa là recipient vẫn xóa được."""
+        admin = await _make_user(db_session, "boss3@test.com", role="admin")
+        owner = await _make_user(db_session, "owner3@test.com", role="owner")
+        victim = await _make_user(db_session, "heavy@test.com", role="owner")
+        await _make_file(db_session, victim.id)
+        other_file = await _make_file(db_session, owner.id)
+        await _share(db_session, other_file.id, victim.id)
+        token = await _login(client, "boss3@test.com")
+
+        resp = await client.delete(
+            f"/auth/admin/users/{victim.id}",
+            headers=_auth(token),
+        )
+        assert resp.status_code == 204

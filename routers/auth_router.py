@@ -28,13 +28,21 @@ import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import audit
 from auth import CurrentUser, JWT_ALGORITHM, _signing_key, get_current_user
 from db.dependencies import get_db
-from db.models import File, RefreshToken, User, UserDisplayNameHistory, UserPublicKey, UserSecurityAlert
+from db.models import (
+    File,
+    FileRecipient,
+    RefreshToken,
+    User,
+    UserDisplayNameHistory,
+    UserPublicKey,
+    UserSecurityAlert,
+)
 from services.azure_storage import delete_blob
 from schemas.user_security import MarkAlertReadRequest, UserSecurityAlertOut, UserSecurityAlertsResponse
 from services import email_verification, google_oauth, owner_security
@@ -1041,6 +1049,9 @@ async def delete_user(
     ).scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User không tồn tại")
+
+    # SQLAlchemy nullify FK mặc định khi xóa user; recipient_id NOT NULL → phải xóa tay
+    await db.execute(delete(FileRecipient).where(FileRecipient.recipient_id == user_id))
 
     # files.owner_id dùng ON DELETE RESTRICT — phải xóa file (và blob) trước user
     files_result = await db.execute(select(File).where(File.owner_id == user_id))

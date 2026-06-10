@@ -86,7 +86,9 @@ class User(Base):
         back_populates="owner", cascade="all, delete-orphan"
     )
     received_files: Mapped[list["FileRecipient"]] = relationship(
-        back_populates="recipient", foreign_keys="FileRecipient.recipient_id"
+        back_populates="recipient",
+        foreign_keys="FileRecipient.recipient_id",
+        passive_deletes=True,
     )
     upload_sessions: Mapped[list["UploadSession"]] = relationship(
         back_populates="owner", cascade="all, delete-orphan"
