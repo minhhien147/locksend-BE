@@ -92,18 +92,31 @@ def _token_metric_to_cic(metric: dict[str, Any]) -> dict[str, float]:
     ip_count = float(metric.get("ip_count") or 1)
     token_age_hours = float(metric.get("token_age_hours") or 0)
 
+    # TRUST Lab / CICFlowMeter 4.x (Pkts, Byts, Dst Port) + alias CIC-IDS2017 cũ
+    flow_bytes_s = flow_packets_s * 1024.0
+    duration_us = token_age_hours * 3_600_000_000.0
+    active_max = token_age_hours * 1_000_000.0
+    dst_port = ip_count * 100.0
     return {
+        # TRUST Lab 2026 / combined model (ưu tiên)
+        "Flow Pkts/s": flow_packets_s,
+        "Flow Byts/s": flow_bytes_s,
+        "Flow Duration": duration_us,
+        "Active Max": active_max,
+        "Idle Max": 0.0,
+        "Tot Fwd Pkts": active_sessions,
+        "Tot Bwd Pkts": 0.0,
+        "Subflow Fwd Pkts": active_sessions,
+        "Dst Port": dst_port,
+        # CIC-IDS2017 legacy (model cũ)
         "Flow Packets/s": flow_packets_s,
-        "Flow Bytes/s": flow_packets_s * 1024.0,
+        "Flow Bytes/s": flow_bytes_s,
         "Fwd Packets/s": flow_packets_s * 0.7,
         "Bwd Packets/s": flow_packets_s * 0.3,
-        "Flow Duration": token_age_hours * 3_600_000_000.0,
-        "Active Max": token_age_hours * 1_000_000.0,
-        "Idle Max": 0.0,
         "Total Fwd Packets": active_sessions,
         "Total Backward Packets": 0.0,
         "Subflow Fwd Packets": active_sessions,
-        "Destination Port": ip_count * 100.0,
+        "Destination Port": dst_port,
     }
 
 

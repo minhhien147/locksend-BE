@@ -332,7 +332,9 @@ async def ai_health(
 ):
     """Kiểm tra LockSend AI model đã train và load được chưa."""
     _require_admin(current)
-    return await locksend_ai.health()
+    health = await locksend_ai.health()
+    health["realtime_enabled"] = ai_realtime.REALTIME_ENABLED
+    return health
 
 
 @router.post("/ai/analyze")

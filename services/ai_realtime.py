@@ -21,7 +21,8 @@ from services import locksend_ai, token_security
 
 logger = logging.getLogger(__name__)
 
-REALTIME_ENABLED = os.getenv("LOCKSEND_AI_REALTIME_ENABLED", "true").lower() in (
+# Mặc định tắt — mỗi request JWT gọi ML tốn RAM/CPU (đặc biệt trên Railway).
+REALTIME_ENABLED = os.getenv("LOCKSEND_AI_REALTIME_ENABLED", "false").lower() in (
     "1",
     "true",
     "yes",
@@ -104,7 +105,7 @@ def _should_run_ai(metric: dict[str, Any]) -> bool:
     rate = float(metric.get("accesses_per_hour") or metric.get("downloads_per_hour") or 0)
     if rule_score >= MIN_RULE_SCORE or rate >= 1:
         return True
-    return os.getenv("LOCKSEND_AI_REALTIME_SCAN_ALL", "true").lower() in ("1", "true", "yes")
+    return os.getenv("LOCKSEND_AI_REALTIME_SCAN_ALL", "false").lower() in ("1", "true", "yes")
 
 
 def _should_alert(result: dict[str, Any]) -> bool:
