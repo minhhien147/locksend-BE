@@ -263,7 +263,7 @@ async def cleanup_old_records(
 ):
     """
     Dọn dẹp SAS records + access logs cũ.
-    SAS records expired > 30 ngày; access logs > 14 ngày.
+    Retention: TOKEN_SAS_RECORD_RETENTION_DAYS (mặc định 30), TOKEN_ACCESS_LOG_RETENTION_DAYS (14).
     """
     _require_admin(current)
     result = await token_security.cleanup_expired_tokens(db)

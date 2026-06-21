@@ -18,7 +18,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -41,6 +41,9 @@ SAS_DOWNLOAD_RATE_THRESHOLD = _env_int(
 )
 SAS_MAX_AGE_HOURS = _env_int("TOKEN_SECURITY_SAS_MAX_AGE_HOURS", "AI_SAS_MAX_AGE_HOURS", "48")
 RISK_AUTO_REVOKE_THRESHOLD = _env_int("TOKEN_SECURITY_AUTO_REVOKE_SCORE", "AI_AUTO_REVOKE_SCORE", "80")
+
+ACCESS_LOG_RETENTION_DAYS = _env_int("TOKEN_ACCESS_LOG_RETENTION_DAYS", "AI_ACCESS_LOG_RETENTION_DAYS", "14")
+SAS_RECORD_RETENTION_DAYS = _env_int("TOKEN_SAS_RECORD_RETENTION_DAYS", "AI_SAS_RECORD_RETENTION_DAYS", "30")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -512,35 +515,38 @@ async def revoke_sas_token(db: AsyncSession, token_id: str, reason: str = "Token
     return True
 
 
-async def cleanup_expired_tokens(db: AsyncSession) -> dict[str, int]:
-    """Xóa SAS records và access logs cũ để giảm DB bloat."""
+async def cleanup_expired_tokens(
+    db: AsyncSession,
+    *,
+    access_log_retention_days: int | None = None,
+    sas_retention_days: int | None = None,
+) -> dict[str, int]:
+    """Xóa SAS records và access logs cũ để giảm DB bloat (bulk DELETE)."""
     now = _utc_now()
-    cutoff_sas = now - timedelta(days=30)
-    cutoff_logs = now - timedelta(days=14)
+    log_days = (
+        access_log_retention_days
+        if access_log_retention_days is not None
+        else ACCESS_LOG_RETENTION_DAYS
+    )
+    sas_days = (
+        sas_retention_days
+        if sas_retention_days is not None
+        else SAS_RECORD_RETENTION_DAYS
+    )
+    cutoff_sas = now - timedelta(days=sas_days)
+    cutoff_logs = now - timedelta(days=log_days)
 
-    # Xóa SAS records đã expire > 30 ngày
-    expired_sas = (
-        await db.execute(
-            select(SasTokenRecord).where(
-                SasTokenRecord.expires_at < cutoff_sas,
-            )
-        )
-    ).scalars().all()
-    sas_count = len(expired_sas)
-    for r in expired_sas:
-        await db.delete(r)
+    sas_result = await db.execute(
+        delete(SasTokenRecord).where(SasTokenRecord.expires_at < cutoff_sas)
+    )
+    log_result = await db.execute(
+        delete(TokenAccessLog).where(TokenAccessLog.created_at < cutoff_logs)
+    )
 
-    # Xóa access logs > 14 ngày
-    old_logs = (
-        await db.execute(
-            select(TokenAccessLog).where(TokenAccessLog.created_at < cutoff_logs)
-        )
-    ).scalars().all()
-    log_count = len(old_logs)
-    for l in old_logs:
-        await db.delete(l)
-
-    return {"deleted_sas_records": sas_count, "deleted_access_logs": log_count}
+    return {
+        "deleted_sas_records": sas_result.rowcount or 0,
+        "deleted_access_logs": log_result.rowcount or 0,
+    }
 
 
 async def auto_revoke_high_risk(db: AsyncSession) -> dict[str, Any]:

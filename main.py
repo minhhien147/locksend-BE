@@ -14,6 +14,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,7 +35,19 @@ logger = logging.getLogger(__name__)
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Secure File Sharing API", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from services.scheduled_cleanup import start_scheduled_cleanup, stop_scheduled_cleanup
+
+    cleanup_task = start_scheduled_cleanup()
+    try:
+        yield
+    finally:
+        await stop_scheduled_cleanup(cleanup_task)
+
+
+app = FastAPI(title="Secure File Sharing API", version="1.0.0", lifespan=lifespan)
 
 _RAW_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _RAW_ORIGINS.split(",") if o.strip()]
