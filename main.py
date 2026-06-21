@@ -1,6 +1,5 @@
 """
 Secure File Sharing — FastAPI backend
-Phase 1: JWT auth + RBAC bảo vệ tất cả endpoint nhạy cảm.
 """
 
 from __future__ import annotations
@@ -9,34 +8,27 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env trước mọi import đọc os.getenv (integrations, DB, …)
+# Load .env trước mọi import đọc os.getenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import logging
 import os
-from datetime import datetime, timezone
 import uuid
 
-from azure.core.exceptions import ResourceNotFoundError
-from azure.keyvault.secrets import SecretClient
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import desc, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth import CurrentUser, get_current_user, require_verified_email, verify_jwt
-from db.dependencies import get_db, get_db_context
-from db.models import User, UserPublicKey
-from services import owner_security
-from services.owner_security import keypair_expires_at_from_now
-from routers.auth_router import router as auth_router
-from routers.integrations_router import router as integrations_router
-from routers.token_security_router import router as token_security_router
-from routers.upload_router import router as upload_router
-from routers.vault_router import router as vault_router
-from schemas.keys import KeyRecord
+from auth import verify_jwt
+from db.dependencies import get_db_context
+from routers import (
+    auth_router,
+    integrations_router,
+    keys_router,
+    token_security_router,
+    upload_router,
+    vault_router,
+)
 from services import token_security as ts
-from services.azure_credentials import get_azure_credential
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +41,7 @@ ALLOWED_ORIGINS = [o.strip() for o in _RAW_ORIGINS.split(",") if o.strip()]
 
 app.include_router(auth_router)
 app.include_router(integrations_router)
+app.include_router(keys_router)
 app.include_router(token_security_router)
 app.include_router(upload_router)
 app.include_router(vault_router)
@@ -62,8 +55,7 @@ app.add_middleware(
     expose_headers=["X-Encryption-Metadata-B64", "X-File-Id"],
 )
 
-# ── Request-ID middleware ─────────────────────────────────────────────────────
-
+# ── Middleware ────────────────────────────────────────────────────────────────
 
 _SKIP_LOG_PATHS = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
 _SENSITIVE_PREFIXES = ("/auth/admin/token-security",)
@@ -82,7 +74,7 @@ async def request_id_middleware(request: Request, call_next):
 async def jwt_access_log_middleware(request: Request, call_next):
     """
     Ghi TokenAccessLog cho mọi request có Bearer token hợp lệ.
-    Bỏ qua: health, docs, token-security admin endpoints (tránh vòng lặp).
+    Bỏ qua: health, docs, token-security admin endpoints.
     """
     response = await call_next(request)
 
@@ -105,8 +97,6 @@ async def jwt_access_log_middleware(request: Request, call_next):
         ip = xff.split(",")[0].strip() if xff else (
             request.client.host if request.client else None
         )
-
-        from db.dependencies import get_db_context
 
         async with get_db_context() as db:
             from sqlalchemy import select
@@ -145,15 +135,7 @@ async def jwt_access_log_middleware(request: Request, call_next):
     return response
 
 
-KEY_VAULT_URL = os.getenv("AZURE_KEY_VAULT_URL", "")
-
-def get_secret_client() -> SecretClient:
-    if not KEY_VAULT_URL:
-        raise HTTPException(status_code=503, detail="Key Vault not configured")
-    return SecretClient(vault_url=KEY_VAULT_URL, credential=get_azure_credential())
-
-
-# ── Health (public) ───────────────────────────────────────────────────────────
+# ── Health & root (public) ────────────────────────────────────────────────────
 
 
 @app.get("/health", tags=["ops"])
@@ -185,178 +167,3 @@ def root():
         "docs": "/docs",
         "health": "/health",
     }
-
-
-# ── Keys ──────────────────────────────────────────────────────────────────────
-
-
-async def _latest_encrypted_blob_for_user(
-    db: AsyncSession, user_id: int, active: UserPublicKey | None
-) -> str | None:
-    """Active row first; else newest rotated row that still has a blob."""
-    if active and active.encrypted_key_blob:
-        return active.encrypted_key_blob
-    row = (
-        await db.execute(
-            select(UserPublicKey.encrypted_key_blob)
-            .where(
-                UserPublicKey.user_id == user_id,
-                UserPublicKey.encrypted_key_blob.isnot(None),
-            )
-            .order_by(desc(UserPublicKey.key_version))
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    return row
-
-
-@app.get("/keys/my-encrypted-blob", tags=["keys"])
-async def get_my_encrypted_blob(
-    current: CurrentUser = Depends(require_verified_email),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Trả encrypted_key_blob của user hiện tại.
-    Zero-knowledge: server chỉ lưu blob đã mã hóa, không biết passphrase.
-    Frontend dùng endpoint này sau F5 nếu sessionStorage wrapper không còn.
-    """
-    user_row = (
-        await db.execute(select(User).where(User.external_id == current.external_id))
-    ).scalar_one_or_none()
-    if user_row is None:
-        raise HTTPException(status_code=404, detail="User không tồn tại")
-
-    krow = (
-        await db.execute(
-            select(UserPublicKey).where(
-                UserPublicKey.user_id == user_row.id,
-                UserPublicKey.is_active.is_(True),
-            )
-        )
-    ).scalar_one_or_none()
-
-    if krow is None:
-        return {"encrypted_key_blob": None, "has_keys": False}
-
-    await owner_security.sync_keypair_expiry_alerts(db, user_row.id)
-    kp = owner_security.keypair_status(krow)
-
-    blob = await _latest_encrypted_blob_for_user(db, user_row.id, krow)
-    if blob and not krow.encrypted_key_blob:
-        krow.encrypted_key_blob = blob
-
-    return {
-        "encrypted_key_blob": blob,
-        "has_keys": True,
-        "public_key_x25519": krow.public_key_x25519,
-        "public_key_ed25519": krow.public_key_ed25519,
-        "keypair_expires_at": kp.get("expires_at"),
-        "keypair_days_left": kp.get("days_left"),
-        "keypair_expired": kp.get("expired", False),
-        "keypair_expiring_soon": kp.get("expiring_soon", False),
-        "key_version": kp.get("key_version"),
-    }
-
-
-@app.get("/keys/{user_id}", tags=["keys"])
-async def get_public_key(
-    user_id: str,
-    _: CurrentUser = Depends(require_verified_email),
-    db: AsyncSession = Depends(get_db),
-):
-    """Lấy public key của user từ DB (fallback từ Key Vault nếu có)."""
-    # Thử Key Vault trước nếu được cấu hình
-    if KEY_VAULT_URL:
-        try:
-            client = get_secret_client()
-            x25519 = client.get_secret(f"pubkey-x25519-{user_id}").value
-            ed25519 = client.get_secret(f"pubkey-ed25519-{user_id}").value
-            return {
-                "user_id": user_id,
-                "public_key_x25519": x25519,
-                "public_key_ed25519": ed25519,
-            }
-        except ResourceNotFoundError:
-            pass  # fallback sang DB
-        except Exception as exc:
-            logger.warning("Key Vault get error, falling back to DB: %s", exc)
-
-    # Fallback: đọc từ DB qua external_id
-    user_row = (await db.execute(
-        select(User).where(User.external_id == user_id)
-    )).scalar_one_or_none()
-    if user_row:
-        krow = (await db.execute(
-            select(UserPublicKey).where(UserPublicKey.user_id == user_row.id, UserPublicKey.is_active.is_(True))
-        )).scalar_one_or_none()
-        if krow:
-            return {
-                "user_id": user_id,
-                "public_key_x25519": krow.public_key_x25519,
-                "public_key_ed25519": krow.public_key_ed25519,
-            }
-    raise HTTPException(status_code=404, detail=f"Key not found for user '{user_id}'")
-
-
-@app.post("/keys", status_code=201, tags=["keys"])
-async def store_public_key(
-    record: KeyRecord,
-    current: CurrentUser = Depends(require_verified_email),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Lưu public key lên Key Vault + upsert vào DB.
-    User chỉ được tự ghi key của mình (hoặc admin ghi cho người khác).
-    """
-    if record.user_id != current.external_id and current.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail="Chỉ được lưu key của chính mình",
-        )
-
-    # Key Vault là tuỳ chọn — bỏ qua nếu chưa cấu hình (local dev)
-    if KEY_VAULT_URL:
-        try:
-            client = get_secret_client()
-            client.set_secret(f"pubkey-x25519-{record.user_id}", record.public_key_x25519)
-            client.set_secret(f"pubkey-ed25519-{record.user_id}", record.public_key_ed25519)
-        except Exception as exc:
-            logger.warning("Key Vault set error (non-fatal): %s", exc)
-
-    result = await db.execute(select(User).where(User.external_id == record.user_id))
-    user = result.scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User không tồn tại trong hệ thống")
-
-    result2 = await db.execute(
-        select(UserPublicKey)
-        .where(UserPublicKey.user_id == user.id, UserPublicKey.is_active.is_(True))
-    )
-    existing = result2.scalar_one_or_none()
-    if existing:
-        existing.is_active = False
-        existing.rotated_at = datetime.now(timezone.utc)
-        new_version = existing.key_version + 1
-    else:
-        new_version = 1
-
-    # Public-key-only sync must not drop the zero-knowledge blob (passphrase unlock).
-    blob = record.encrypted_key_blob
-    if not blob and existing and existing.encrypted_key_blob:
-        blob = existing.encrypted_key_blob
-
-    db.add(
-        UserPublicKey(
-            user_id=user.id,
-            public_key_x25519=record.public_key_x25519,
-            public_key_ed25519=record.public_key_ed25519,
-            encrypted_key_blob=blob,
-            key_version=new_version,
-            is_active=True,
-            expires_at=keypair_expires_at_from_now(),
-        )
-    )
-    await owner_security.sync_keypair_expiry_alerts(db, user.id)
-    logger.info("Public key stored for user %s (version %d)", user.id, new_version)
-    return {"status": "stored", "user_id": record.user_id}
-
