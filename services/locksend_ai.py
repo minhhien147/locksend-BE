@@ -81,6 +81,28 @@ def _ensure_loaded() -> None:
         raise RuntimeError(_load_error) from exc
 
 
+def reload_bundle() -> dict[str, Any]:
+    """
+    Hot-reload model.pkl vào RAM sau khi train.py chạy xong.
+
+    Reset cache buộc _ensure_loaded() đọc lại file từ disk.
+    An toàn khi gọi từ thread pool (asyncio.to_thread) vì chỉ thao tác
+    global module-level và pickle.load — không có race condition với
+    inference đang chạy (CPython GIL bảo vệ việc gán _bundle).
+    """
+    global _bundle, _load_error
+    _bundle = None
+    _load_error = None
+    _ensure_loaded()
+    assert _bundle is not None
+    logger.info(
+        "LockSend AI bundle reloaded (version=%s, trained_at=%s)",
+        _bundle.get("version"),
+        _bundle.get("trained_at"),
+    )
+    return _bundle
+
+
 def _token_metric_to_cic(metric: dict[str, Any]) -> dict[str, float]:
     raw_rate = float(
         metric.get("accesses_per_hour")

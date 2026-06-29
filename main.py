@@ -39,12 +39,15 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from services.scheduled_cleanup import start_scheduled_cleanup, stop_scheduled_cleanup
+    from services.scheduled_retrain import start_scheduled_retrain, stop_scheduled_retrain
 
     cleanup_task = start_scheduled_cleanup()
+    retrain_task = start_scheduled_retrain()
     try:
         yield
     finally:
         await stop_scheduled_cleanup(cleanup_task)
+        await stop_scheduled_retrain(retrain_task)
 
 
 app = FastAPI(title="Secure File Sharing API", version="1.0.0", lifespan=lifespan)

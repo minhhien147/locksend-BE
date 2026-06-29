@@ -78,6 +78,22 @@ async def authorize_file_download(
         raise HTTPException(status_code=403, detail="Bạn không có quyền tải file này")
 
 
+async def ensure_sas_download_allowed(db: AsyncSession, sas_url: str) -> str:
+    """
+    SAS URL là bearer credential cho blob — dùng thay authorize_file_download
+    khi client gửi link tải (trang Download / proxy CORS).
+    """
+    from services.token_security import is_sas_revoked
+
+    blob_name = blob_name_from_sas_url(sas_url)
+    if await is_sas_revoked(db, blob_name, None):
+        raise HTTPException(
+            status_code=403,
+            detail="SAS token cho blob này đã bị thu hồi bởi quản trị viên",
+        )
+    return blob_name
+
+
 def metadata_for_file(file_row: FileModel) -> dict:
     return file_row.metadata_json if isinstance(file_row.metadata_json, dict) else {}
 

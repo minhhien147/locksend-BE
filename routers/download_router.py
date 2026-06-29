@@ -7,7 +7,7 @@ import logging
 
 import audit
 from azure.storage.blob import BlobClient
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +19,11 @@ from schemas.files import CiphertextInfoResponse, DownloadLogRequest, SasCiphert
 from services.azure_storage import CONTAINER_NAME, get_blob_service_client
 from services.chunk_layout import encrypted_chunk_byte_length, encrypted_chunk_offset, is_chunked_metadata
 
-from routers._upload_helpers import authorize_file_download, blob_name_from_sas_url, metadata_for_file
+from routers._upload_helpers import (
+    authorize_file_download,
+    ensure_sas_download_allowed,
+    metadata_for_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +39,10 @@ async def ciphertext_info_by_sas(
     db: AsyncSession = Depends(get_db),
 ):
     """Trả metadata + file_id từ SAS URL — không tải blob."""
-    blob_name = blob_name_from_sas_url(body.sas_url)
+    blob_name = await ensure_sas_download_allowed(db, body.sas_url)
     file_row = (await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))).scalar_one_or_none()
     if file_row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy file")
-    await authorize_file_download(db, file_row, current)
     metadata = metadata_for_file(file_row)
     if not metadata:
         raise HTTPException(status_code=404, detail="Không tìm thấy metadata mã hóa")
@@ -57,11 +60,10 @@ async def download_ciphertext_by_sas(
     db: AsyncSession = Depends(get_db),
 ):
     """Proxy tải ciphertext từ SAS URL qua backend (tránh CORS ở browser)."""
-    blob_name = blob_name_from_sas_url(body.sas_url)
+    blob_name = await ensure_sas_download_allowed(db, body.sas_url)
     file_row = (await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))).scalar_one_or_none()
     if file_row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy file")
-    await authorize_file_download(db, file_row, current)
 
     try:
         blob_client = BlobClient.from_blob_url(body.sas_url)
@@ -93,6 +95,7 @@ async def download_ciphertext_by_sas(
 async def download_ciphertext_chunk(
     file_id: str,
     chunk_index: int,
+    sas_url: str | None = Query(default=None, min_length=1),
     current: CurrentUser = Depends(require_roles("owner", "recipient", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -104,7 +107,6 @@ async def download_ciphertext_chunk(
     if file_row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy file")
 
-    await authorize_file_download(db, file_row, current)
     metadata = metadata_for_file(file_row)
     if not is_chunked_metadata(metadata):
         raise HTTPException(status_code=400, detail="File không dùng chế độ chunked")
@@ -117,8 +119,15 @@ async def download_ciphertext_chunk(
     length = encrypted_chunk_byte_length(metadata, chunk_index)
 
     try:
-        client = get_blob_service_client()
-        blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=file_row.blob_name)
+        if sas_url:
+            sas_blob = await ensure_sas_download_allowed(db, sas_url)
+            if sas_blob != file_row.blob_name:
+                raise HTTPException(status_code=400, detail="SAS URL không khớp file_id")
+            blob_client = BlobClient.from_blob_url(sas_url.strip())
+        else:
+            await authorize_file_download(db, file_row, current)
+            client = get_blob_service_client()
+            blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=file_row.blob_name)
         data = blob_client.download_blob(offset=offset, length=length).readall()
     except Exception as exc:
         logger.exception("download_ciphertext_chunk failed file=%s chunk=%s: %s", file_id, chunk_index, exc)
