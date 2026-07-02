@@ -81,7 +81,7 @@ async def download_ciphertext_by_sas(
 
     headers = {
         "X-File-Id": file_row.id,
-        "Content-Disposition": f'attachment; filename="{file_row.original_filename}.enc"',
+        "Content-Disposition": f'attachment; filename="{file_row.original_filename}.lsc"',
     }
     if metadata_b64:
         headers["X-Encryption-Metadata-B64"] = metadata_b64

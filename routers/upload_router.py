@@ -190,7 +190,7 @@ async def multipart_init(
 ):
     """Bước 1: Khởi tạo phiên multipart upload."""
     safe_name = filename.replace("/", "_").replace("..", "_")
-    blob_name = f"{uuid.uuid4()}/{safe_name}.enc"
+    blob_name = f"{uuid.uuid4()}/{safe_name}.lsc"
     session_id = str(uuid.uuid4())
 
     db.add(UploadSession(

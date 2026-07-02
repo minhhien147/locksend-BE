@@ -422,7 +422,7 @@ async def download_vault_ciphertext(
         headers={
             "X-Encryption-Metadata-B64": meta_b64,
             "X-File-Id": file.id,
-            "Content-Disposition": f'attachment; filename="{file.original_filename}.enc"',
+            "Content-Disposition": f'attachment; filename="{file.original_filename}.lsc"',
         },
     )
 
