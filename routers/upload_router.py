@@ -20,7 +20,7 @@ from schemas.files import MultipartFinalizeRequest, MultipartInitResponse, SasRe
 from services.azure_storage import CONTAINER_NAME, get_blob_service_client
 from services.vault_storage import assert_vault_quota, resolve_folder
 
-from routers._upload_helpers import generate_and_track_sas, get_client_ip
+from routers._upload_helpers import generate_and_track_sas, get_client_ip, sanitize_filename
 from routers.files_router import router as files_router
 from routers.download_router import router as download_router
 
@@ -49,7 +49,9 @@ async def upload_file(
     if mode not in ("share", "vault"):
         raise HTTPException(status_code=422, detail="storage_mode phải là share hoặc vault")
 
-    blob_name = f"{uuid.uuid4()}/{file.filename}"
+    # A03: Sanitize tên file blob để tránh path traversal
+    safe_blob_filename = sanitize_filename(file.filename or "upload")
+    blob_name = f"{uuid.uuid4()}/{safe_blob_filename}"
     ciphertext = await file.read()
     file_size = len(ciphertext)
 
@@ -189,7 +191,7 @@ async def multipart_init(
     db: AsyncSession = Depends(get_db),
 ):
     """Bước 1: Khởi tạo phiên multipart upload."""
-    safe_name = filename.replace("/", "_").replace("..", "_")
+    safe_name = sanitize_filename(filename)
     blob_name = f"{uuid.uuid4()}/{safe_name}.lsc"
     session_id = str(uuid.uuid4())
 

@@ -13,6 +13,7 @@ from services.assistant_knowledge import (
     LOCKSEND_ASSISTANT_KNOWLEDGE,
     LOCKSEND_ASSISTANT_RULES,
 )
+from services.ssrf_guard import validate_gemini_base
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,16 @@ def _timeout() -> float:
 
 
 def _api_base() -> str:
-    return os.getenv(
+    raw = os.getenv(
         "GEMINI_API_BASE",
         "https://generativelanguage.googleapis.com/v1beta",
     ).rstrip("/")
+    # A10: Chỉ cho phép googleapis.com
+    try:
+        return validate_gemini_base(raw)
+    except Exception as exc:
+        logger.error("SECURITY A10: GEMINI_API_BASE bị từ chối — %s", exc)
+        return "https://generativelanguage.googleapis.com/v1beta"
 
 
 def is_configured() -> bool:

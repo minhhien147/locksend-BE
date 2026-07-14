@@ -1,7 +1,9 @@
-"""_upload_helpers.py — Shared helpers dùng chung bởi upload sub-routers."""
+"""_upload_helpers.py — Shared constants, schemas và helpers dùng chung bởi upload sub-routers."""
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
@@ -13,6 +15,49 @@ from db.models import File as FileModel, FileRecipient, RecipientStatus
 from services.azure_storage import CONTAINER_NAME, STORAGE_ACCOUNT, generate_sas_url
 
 logger = logging.getLogger(__name__)
+
+# A03: Filename sanitization ──────────────────────────────────────────────────
+
+_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_DOT_SEGMENTS = re.compile(r'\.{2,}')
+_MAX_FILENAME_LEN = 200
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    A03 – Injection: Làm sạch tên file, loại bỏ path traversal và ký tự nguy hiểm.
+    - Strip null bytes, control chars
+    - Loại bỏ directory separators, double-dots
+    - Normalize unicode (NFC)
+    - Giới hạn độ dài
+    """
+    if not filename:
+        return "upload"
+
+    # Normalize unicode
+    name = unicodedata.normalize("NFC", filename)
+
+    # Chỉ lấy phần basename (tránh path traversal)
+    name = re.split(r'[/\\]', name)[-1]
+
+    # Xoá ký tự nguy hiểm
+    name = _UNSAFE_CHARS.sub("_", name)
+
+    # Loại bỏ double-dot sequences
+    name = _DOT_SEGMENTS.sub("_", name)
+
+    # Strip leading/trailing dots và spaces
+    name = name.strip(". ")
+
+    # Giới hạn độ dài
+    if len(name) > _MAX_FILENAME_LEN:
+        base, _, ext = name.rpartition(".")
+        if ext and len(ext) <= 10:
+            name = base[: _MAX_FILENAME_LEN - len(ext) - 1] + "." + ext
+        else:
+            name = name[:_MAX_FILENAME_LEN]
+
+    return name or "upload"
 
 
 def get_client_ip(request: Request) -> str | None:

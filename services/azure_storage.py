@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Tuple
 
 from azure.storage.blob import (
@@ -11,8 +12,41 @@ from azure.storage.blob import (
 )
 from services.azure_credentials import get_azure_credential
 
+logger = logging.getLogger(__name__)
+
 STORAGE_ACCOUNT = os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "")
 CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "secure-files")
+
+
+def check_container_not_public() -> None:
+    """
+    Fix #8 — A01/A05: Kiểm tra Azure Blob Container không để public access.
+    Chỉ cảnh báo (warning) vì không muốn block startup nếu Azure chưa sẵn sàng.
+    Gọi từ lifespan startup của FastAPI.
+    """
+    if not STORAGE_ACCOUNT:
+        return
+    try:
+        client = get_blob_service_client()
+        container_client = client.get_container_client(CONTAINER_NAME)
+        props = container_client.get_container_properties()
+        public_access = props.get("public_access") or ""
+        if public_access:
+            logger.error(
+                "SECURITY A01/A05: Azure container '%s' có public_access='%s'! "
+                "Ciphertext có thể bị download tự do. "
+                "Vào Azure Portal → Storage Account → Containers → %s → "
+                "Change access level → Private.",
+                CONTAINER_NAME, public_access, CONTAINER_NAME,
+            )
+        else:
+            logger.info(
+                "Azure container '%s' access: Private ✅", CONTAINER_NAME
+            )
+    except Exception as exc:
+        logger.warning(
+            "Không kiểm tra được Azure container access: %s", exc
+        )
 
 
 def get_blob_service_client() -> BlobServiceClient:

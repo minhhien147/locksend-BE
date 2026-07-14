@@ -22,11 +22,20 @@ from typing import Any
 import httpx
 
 from services.ai_explain import enrich_ai_result
+from services.ssrf_guard import validate_locksend_ai_url
 
 logger = logging.getLogger(__name__)
 
 LOCKSEND_AI_URL = os.getenv("LOCKSEND_AI_URL", "").rstrip("/")
 LOCKSEND_AI_API_KEY = os.getenv("LOCKSEND_AI_API_KEY", "").strip()
+
+# A10: Validate SSRF trước khi sử dụng URL
+if LOCKSEND_AI_URL:
+    try:
+        LOCKSEND_AI_URL = validate_locksend_ai_url(LOCKSEND_AI_URL)
+    except ValueError as _ssrf_err:
+        logger.error("SECURITY A10: LOCKSEND_AI_URL bị từ chối — %s", _ssrf_err)
+        LOCKSEND_AI_URL = ""
 def _default_ai_dir() -> str:
     """Monorepo: <repo>/locksend-ai (cạnh backend/, frontend/)."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -113,6 +122,12 @@ def _token_metric_to_cic(metric: dict[str, Any]) -> dict[str, float]:
     active_sessions = float(metric.get("active_sessions") or 1)
     ip_count = float(metric.get("ip_count") or 1)
     token_age_hours = float(metric.get("token_age_hours") or 0)
+
+    # A03: Clamp giá trị về range hợp lệ — tránh NaN/Inf làm lệch model
+    flow_packets_s = max(0.0, min(flow_packets_s, 1e6))
+    active_sessions = max(0.0, min(active_sessions, 1e5))
+    ip_count = max(1.0, min(ip_count, 1e4))
+    token_age_hours = max(0.0, min(token_age_hours, 8760.0))  # tối đa 1 năm
 
     # TRUST Lab / CICFlowMeter 4.x (Pkts, Byts, Dst Port) + alias CIC-IDS2017 cũ
     flow_bytes_s = flow_packets_s * 1024.0

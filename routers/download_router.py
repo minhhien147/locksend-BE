@@ -4,6 +4,10 @@ from __future__ import annotations
 import base64 as b64mod
 import json
 import logging
+import os
+import time
+from collections import defaultdict
+from threading import Lock
 
 import audit
 from azure.storage.blob import BlobClient
@@ -28,6 +32,31 @@ from routers._upload_helpers import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["download"], dependencies=[Depends(require_verified_email)])
+
+# A04: Download rate limit per recipient per file ─────────────────────────────
+_DOWNLOAD_MAX = int(os.getenv("DOWNLOAD_MAX_PER_RECIPIENT", "20"))   # lần tối đa
+_DOWNLOAD_WINDOW = int(os.getenv("DOWNLOAD_RATE_WINDOW", "3600"))    # trong N giây
+
+_dl_counts: dict[str, list[float]] = defaultdict(list)
+_dl_lock = Lock()
+
+
+def _check_download_rate(user_id: str, file_id: str | None) -> None:
+    """A04: Giới hạn số lần download mỗi recipient cho mỗi file trong 1 giờ."""
+    if not file_id:
+        return
+    key = f"{user_id}:{file_id}"
+    now = time.monotonic()
+    with _dl_lock:
+        recent = [t for t in _dl_counts[key] if now - t < _DOWNLOAD_WINDOW]
+        if len(recent) >= _DOWNLOAD_MAX:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Vượt giới hạn download ({_DOWNLOAD_MAX} lần/{_DOWNLOAD_WINDOW}s). Thử lại sau.",
+                headers={"Retry-After": str(_DOWNLOAD_WINDOW)},
+            )
+        recent.append(now)
+        _dl_counts[key] = recent
 
 
 # ── Ciphertext by SAS ─────────────────────────────────────────────────────────
@@ -178,10 +207,27 @@ async def _persist_download_log(
         user_agent=request.headers.get("user-agent"),
     ))
     await db.flush()
+
+    # A04: Rate limit check — giới hạn downloads per recipient per file
+    _check_download_rate(current.id, fid_logged)
+
     if fid_logged:
         from services import owner_security
         await owner_security.maybe_alert_multi_ip_access(db, fid_logged)
+
+    # A09: Log cảnh báo nếu file có quá nhiều lượt download trong session
     audit.log_event("file.download", user_id=current.id, role=current.role, file_id=fid_logged, blob_name=blob_logged)
+
+    # A09: Phát hiện download bất thường — số lần cao trong cửa sổ thời gian
+    if fid_logged:
+        key = f"{current.id}:{fid_logged}"
+        with _dl_lock:
+            recent_count = len([t for t in _dl_counts.get(key, []) if time.monotonic() - t < _DOWNLOAD_WINDOW])
+        if recent_count >= max(1, _DOWNLOAD_MAX // 2):
+            logger.warning(
+                "SECURITY A09: Lượt download bất thường — user=%s file=%s count=%d/%d trong %ds",
+                current.id, fid_logged, recent_count, _DOWNLOAD_MAX, _DOWNLOAD_WINDOW,
+            )
     return {"status": "logged"}
 
 

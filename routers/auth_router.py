@@ -30,6 +30,7 @@ from routers._auth_helpers import (
     set_refresh_cookie,
     verify_password,
 )
+from services.login_guard import check_and_record_attempt, clear_attempts, record_failed_attempt
 from routers.profile_router import router as profile_router
 from routers.users_router import router as users_router
 from routers.verification_router import router as verification_router
@@ -176,18 +177,41 @@ async def login(
 ):
     """Đăng nhập bằng email + mật khẩu."""
     email = normalize_email(str(body.username))
+    client_ip = request.headers.get("X-Forwarded-For", "")
+    if not client_ip and request.client:
+        client_ip = request.client.host
+
+    # A07: Kiểm tra brute-force lockout trước khi truy vấn DB
+    check_and_record_attempt(client_ip, email)
+
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
 
     if user is None or not user.password_hash:
-        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
-    if not verify_password(body.password, user.password_hash):
+        record_failed_attempt(client_ip, email)
         audit.log_event(
             "user.login.failed",
             username=email,
+            reason="user_not_found_or_no_password",
             ip=audit.get_ip(request),
+            user_agent=request.headers.get("User-Agent"),
             request_id=audit.get_request_id(request),
         )
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+    if not verify_password(body.password, user.password_hash):
+        record_failed_attempt(client_ip, email)
+        audit.log_event(
+            "user.login.failed",
+            username=email,
+            user_id=user.id,
+            reason="wrong_password",
+            ip=audit.get_ip(request),
+            user_agent=request.headers.get("User-Agent"),
+            request_id=audit.get_request_id(request),
+        )
+        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+
+    # Đăng nhập thành công — xoá lịch sử attempts
+    clear_attempts(client_ip, email)
 
     jti, expires_at = await issue_refresh_token(db, user, request)
     await owner_security.sync_keypair_expiry_alerts(db, user.id)
