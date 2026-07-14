@@ -49,9 +49,19 @@ def check_container_not_public() -> None:
         )
 
 
+_blob_service_client: BlobServiceClient | None = None
+
+
 def get_blob_service_client() -> BlobServiceClient:
-    account_url = f"https://{STORAGE_ACCOUNT}.blob.core.windows.net"
-    return BlobServiceClient(account_url=account_url, credential=get_azure_credential())
+    """Return a cached BlobServiceClient to reuse the underlying connection pool."""
+    global _blob_service_client
+    if _blob_service_client is None:
+        account_url = f"https://{STORAGE_ACCOUNT}.blob.core.windows.net"
+        _blob_service_client = BlobServiceClient(
+            account_url=account_url,
+            credential=get_azure_credential(),
+        )
+    return _blob_service_client
 
 
 def generate_sas_url(blob_name: str, hours: int = 24) -> Tuple[str, str]:

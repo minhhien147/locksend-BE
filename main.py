@@ -116,6 +116,8 @@ async def lifespan(app: FastAPI):
     finally:
         await stop_scheduled_cleanup(cleanup_task)
         await stop_scheduled_retrain(retrain_task)
+        from services.locksend_ai import close_http_client
+        await close_http_client()
 
 
 app = FastAPI(
