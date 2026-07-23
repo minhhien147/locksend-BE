@@ -3,6 +3,7 @@ auth_router.py — Core auth: register, login, Google OAuth, refresh, logout.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid as _uuid_mod
 
@@ -31,6 +32,7 @@ from routers._auth_helpers import (
     verify_password,
 )
 from services.login_guard import check_and_record_attempt, clear_attempts, record_failed_attempt
+from routers.activity_router import router as activity_router
 from routers.profile_router import router as profile_router
 from routers.users_router import router as users_router
 from routers.verification_router import router as verification_router
@@ -43,6 +45,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 router.include_router(profile_router)
 router.include_router(users_router)
 router.include_router(verification_router)
+router.include_router(activity_router)
 
 
 # ── Register ──────────────────────────────────────────────────────────────────
@@ -197,7 +200,10 @@ async def login(
             request_id=audit.get_request_id(request),
         )
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
-    if not verify_password(body.password, user.password_hash):
+    password_ok = await asyncio.get_running_loop().run_in_executor(
+        None, verify_password, body.password, user.password_hash
+    )
+    if not password_ok:
         record_failed_attempt(client_ip, email)
         audit.log_event(
             "user.login.failed",
