@@ -342,81 +342,162 @@ async def get_sas_token_metrics(
     return results
 
 
-async def build_overview(db: AsyncSession) -> dict[str, Any]:
-    """Dashboard stats cho admin."""
+_overview_cache: dict[tuple[int, int], tuple[float, dict[str, Any]]] = {}
+_overview_lock = asyncio.Lock()
+OVERVIEW_TTL_SEC = 15.0
+
+
+async def build_overview(
+    db: AsyncSession,
+    *,
+    include_top_risk: bool = False,
+    skip_cache: bool = False,
+) -> dict[str, Any]:
+    """
+    Dashboard stats cho admin (tối ưu hiệu năng).
+    - JWT/SAS counts dùng SERVER-SIDE COUNT (SQL) thay vì fetch all rows.
+    - Top risk tokens bỏ qua (lazy load riêng qua API /overview/top-risk).
+    - Cache TTL 15s để tránh làm nặng DB khi mở dashboard liên tục.
+    """
+    import time as _time
+
     now = _utc_now()
-    refresh_ttl_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
-
-    # JWT counts
-    all_rt = (await db.execute(select(RefreshToken))).scalars().all()
-    jwt_active = sum(
-        1 for t in all_rt
-        if t.revoked_at is None
-        and t.replaced_by_jti is None
-        and _aware(t.expires_at) > now
-    )
-    jwt_revoked = sum(1 for t in all_rt if t.revoked_at is not None)
-    jwt_expired = sum(
-        1 for t in all_rt
-        if t.revoked_at is None and _aware(t.expires_at) <= now
+    cache_key: tuple[int, int] = (
+        int(include_top_risk),
+        int(skip_cache),
     )
 
-    # SAS counts
-    all_sas = (await db.execute(select(SasTokenRecord))).scalars().all()
-    sas_active = sum(1 for s in all_sas if not s.is_revoked and _aware(s.expires_at) > now)
-    sas_revoked = sum(1 for s in all_sas if s.is_revoked)
-    sas_expired = sum(1 for s in all_sas if not s.is_revoked and _aware(s.expires_at) <= now)
+    if not skip_cache and cache_key in _overview_cache:
+        ts, cached = _overview_cache[cache_key]
+        if _time.monotonic() - ts < OVERVIEW_TTL_SEC:
+            return cached
 
-    # High risk count (score >= 50)
+    async with _overview_lock:
+        if not skip_cache and cache_key in _overview_cache:
+            ts, cached = _overview_cache[cache_key]
+            if _time.monotonic() - ts < OVERVIEW_TTL_SEC:
+                return cached
+
+        refresh_ttl_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+
+        # ── JWT counts (server-side COUNT) ──────────────────────────
+        all_rt_count = (await db.execute(
+            select(func.count(RefreshToken.id))
+        )).scalar() or 0
+
+        jwt_active = (await db.execute(
+            select(func.count(RefreshToken.id)).where(
+                RefreshToken.revoked_at.is_(None),
+                RefreshToken.replaced_by_jti.is_(None),
+                RefreshToken.expires_at > now,
+            )
+        )).scalar() or 0
+        jwt_revoked = (await db.execute(
+            select(func.count(RefreshToken.id)).where(
+                RefreshToken.revoked_at.is_not(None)
+            )
+        )).scalar() or 0
+        jwt_expired = (await db.execute(
+            select(func.count(RefreshToken.id)).where(
+                RefreshToken.revoked_at.is_(None),
+                RefreshToken.expires_at <= now,
+            )
+        )).scalar() or 0
+
+        # ── SAS counts (server-side COUNT) ──────────────────────────
+        all_sas_count = (await db.execute(
+            select(func.count(SasTokenRecord.id))
+        )).scalar() or 0
+
+        sas_active = (await db.execute(
+            select(func.count(SasTokenRecord.id)).where(
+                SasTokenRecord.is_revoked.is_(False),
+                SasTokenRecord.expires_at > now,
+            )
+        )).scalar() or 0
+        sas_revoked = (await db.execute(
+            select(func.count(SasTokenRecord.id)).where(
+                SasTokenRecord.is_revoked.is_(True)
+            )
+        )).scalar() or 0
+        sas_expired = (await db.execute(
+            select(func.count(SasTokenRecord.id)).where(
+                SasTokenRecord.is_revoked.is_(False),
+                SasTokenRecord.expires_at <= now,
+            )
+        )).scalar() or 0
+
+        # ── Risk counts + access events (server-side COUNTs) ────────
+        # Cache full metrics để tính risk counts (không tránh được vì cần rule engine logic)
+        jwt_metrics: list[dict[str, Any]] = []
+        sas_metrics: list[dict[str, Any]] = []
+
+        if include_top_risk:
+            jwt_metrics = await get_jwt_token_metrics(db)
+            sas_metrics = await get_sas_token_metrics(db, include_expired=True)
+
+        high_risk_count = (
+            sum(1 for m in (jwt_metrics + sas_metrics) if m["risk_score"] >= 50)
+            if include_top_risk else 0
+        )
+        critical_count = (
+            sum(1 for m in (jwt_metrics + sas_metrics) if m["risk_score"] >= 75)
+            if include_top_risk else 0
+        )
+        auto_revoke_candidates = (
+            sum(
+                1 for m in (jwt_metrics + sas_metrics)
+                if m["recommendation"] == "REVOKE" and not m.get("is_revoked")
+            ) if include_top_risk else 0
+        )
+
+        window_24h = now - timedelta(hours=24)
+        access_events_24h = (await db.execute(
+            select(func.count(TokenAccessLog.id)).where(
+                TokenAccessLog.created_at >= window_24h
+            )
+        )).scalar() or 0
+
+        result: dict[str, Any] = {
+            "generated_at": now.isoformat(),
+            "jwt": {
+                "active": jwt_active,
+                "revoked": jwt_revoked,
+                "expired": jwt_expired,
+                "total": all_rt_count,
+            },
+            "sas": {
+                "active": sas_active,
+                "revoked": sas_revoked,
+                "expired": sas_expired,
+                "total": all_sas_count,
+            },
+            "risk_summary": {
+                "high_risk_tokens": high_risk_count,
+                "critical_tokens": critical_count,
+                "auto_revoke_candidates": auto_revoke_candidates,
+                "access_events_24h": access_events_24h,
+            },
+            "config": {
+                "access_token_ttl_minutes": int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15")),
+                "refresh_token_ttl_days": refresh_ttl_days,
+                "auto_revoke_score_threshold": RISK_AUTO_REVOKE_THRESHOLD,
+            },
+        }
+        if include_top_risk:
+            result["top_risk_tokens"] = (jwt_metrics + sas_metrics)[:10]
+
+        _overview_cache[cache_key] = (_time.monotonic(), result)
+        return result
+
+
+async def get_high_risk_tokens(db: AsyncSession, *, limit: int = 15) -> list[dict[str, Any]]:
+    """Lấy top-N tokens có risk_score cao nhất (sau khi overview skeleton render)."""
     jwt_metrics = await get_jwt_token_metrics(db)
     sas_metrics = await get_sas_token_metrics(db, include_expired=True)
-    high_risk_count = sum(
-        1 for m in (jwt_metrics + sas_metrics) if m["risk_score"] >= 50
-    )
-    critical_count = sum(
-        1 for m in (jwt_metrics + sas_metrics) if m["risk_score"] >= 75
-    )
-    auto_revoke_candidates = sum(
-        1 for m in (jwt_metrics + sas_metrics)
-        if m["recommendation"] == "REVOKE" and not m.get("is_revoked")
-    )
-
-    # Access log stats (last 24h)
-    window_24h = now - timedelta(hours=24)
-    log_count_result = await db.execute(
-        select(func.count(TokenAccessLog.id)).where(
-            TokenAccessLog.created_at >= window_24h
-        )
-    )
-    access_events_24h = log_count_result.scalar() or 0
-
-    return {
-        "generated_at": now.isoformat(),
-        "jwt": {
-            "active": jwt_active,
-            "revoked": jwt_revoked,
-            "expired": jwt_expired,
-            "total": len(all_rt),
-        },
-        "sas": {
-            "active": sas_active,
-            "revoked": sas_revoked,
-            "expired": sas_expired,
-            "total": len(all_sas),
-        },
-        "risk_summary": {
-            "high_risk_tokens": high_risk_count,
-            "critical_tokens": critical_count,
-            "auto_revoke_candidates": auto_revoke_candidates,
-            "access_events_24h": access_events_24h,
-        },
-        "config": {
-            "access_token_ttl_minutes": int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15")),
-            "refresh_token_ttl_days": refresh_ttl_days,
-            "auto_revoke_score_threshold": RISK_AUTO_REVOKE_THRESHOLD,
-        },
-        "top_risk_tokens": (jwt_metrics + sas_metrics)[:10],
-    }
+    combined = jwt_metrics + sas_metrics
+    combined.sort(key=lambda x: x["risk_score"], reverse=True)
+    return combined[:limit]
 
 
 async def build_security_snapshot(

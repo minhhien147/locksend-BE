@@ -191,17 +191,7 @@ async def _save_snapshot(
     *,
     source: str,
 ) -> None:
-    snap = TokenAiScoreSnapshot(
-        token_type=str(metric.get("token_type") or "jwt"),
-        token_ref=str(metric.get("token_id") or metric.get("user_id") or ""),
-        user_id=metric.get("user_id"),
-        rule_score=int(result.get("rule_score") or metric.get("risk_score") or 0),
-        ai_score_pct=int(result.get("risk_score_pct") or 0),
-        ai_level=str(result.get("ai_level_raw") or ""),
-        decision=str(result.get("decision") or "MONITOR"),
-        source=source,
-    )
-    db.add(snap)
+    db.add(_build_snapshot_obj(metric, result, source=source))
 
 
 async def save_manual_snapshot(
@@ -210,6 +200,92 @@ async def save_manual_snapshot(
     result: dict[str, Any],
 ) -> None:
     await _save_snapshot(db, metric, result, source="manual")
+
+
+async def bulk_save_manual_snapshots(
+    db: AsyncSession,
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> int:
+    """
+    Bulk save AI snapshots thay vì từng dòng — giảm round-trip DB.
+    Trả về số lượng record đã được add (commit ở caller).
+    """
+    if not pairs:
+        return 0
+    batch: list[TokenAiScoreSnapshot] = []
+    for metric, result in pairs:
+        batch.append(_build_snapshot_obj(metric, result, source="bulk_manual"))
+    db.add_all(batch)
+    await db.flush()
+    return len(batch)
+
+
+INCREMENTAL_WINDOW_SEC = int(os.getenv("LOCKSEND_AI_INCREMENTAL_WINDOW", "1800"))  # mặc định 30 phút
+
+
+async def find_recently_analyzed_token_refs(
+    db: AsyncSession,
+    *,
+    token_refs: list[str],
+) -> set[str]:
+    """
+    Trả về set các token_ref đã có snapshot trong INCREMENTAL_WINDOW_SEC.
+    Dùng cho incremental analysis (bỏ qua token đã được phân tích gần đây).
+    """
+    if not token_refs:
+        return set()
+    cutoff = _utc_now() - timedelta(seconds=INCREMENTAL_WINDOW_SEC)
+    q = (
+        select(TokenAiScoreSnapshot.token_ref)
+        .where(
+            TokenAiScoreSnapshot.token_ref.in_(token_refs),
+            TokenAiScoreSnapshot.created_at >= cutoff,
+        )
+        .distinct()
+    )
+    rows = (await db.execute(q)).scalars().all()
+    return set(rows)
+
+
+def _build_snapshot_obj(
+    metric: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    source: str,
+) -> TokenAiScoreSnapshot:
+    """Helper tạo Snapshot ORM object (không add vào session)."""
+    import uuid as _uuid_mod
+    token_ref = (
+        str(metric.get("token_id"))
+        or str(metric.get("user_id"))
+        or f"unknown:{_uuid_mod.uuid4().hex[:8]}"
+    )
+    user_id = metric.get("user_id")
+    if isinstance(user_id, str) and len(user_id) > 36:
+        user_id = user_id[:36]
+    rule_score_raw = int(metric.get("risk_score") or 0)
+    return TokenAiScoreSnapshot(
+        id=str(_uuid_mod.uuid4()),
+        token_type=str(metric.get("token_type") or "unknown"),
+        token_ref=token_ref,
+        user_id=user_id,
+        rule_score=rule_score_raw,
+        ai_score_pct=int(result.get("risk_score_pct") or 0),
+        ai_level=str(result.get("ai_level_raw") or ""),
+        decision=str(result.get("decision") or "MONITOR"),
+        source=source,
+    )
+
+
+async def _save_snapshot(
+    db: AsyncSession,
+    metric: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    source: str,
+) -> None:
+    db.add(_build_snapshot_obj(metric, result, source=source))
+    await db.flush()
 
 
 async def _recent_alert_exists(db: AsyncSession, token_ref: str) -> bool:

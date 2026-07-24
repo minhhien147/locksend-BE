@@ -51,6 +51,13 @@ class RecipientStatus(str, enum.Enum):
     pending = "pending"
 
 
+class AiJobStatus(str, enum.Enum):
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
 # ── Tables ────────────────────────────────────────────────────────────────────
 
 
@@ -581,6 +588,45 @@ class TokenAiScoreSnapshot(Base):
     source: Mapped[str] = mapped_column(Text, nullable=False, default="realtime")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User | None"] = relationship()
+
+
+class TokenAiAnalysisJob(Base):
+    """Bảng track tiến trình background job phân tích AI cho token list."""
+
+    __tablename__ = "token_ai_analysis_jobs"
+    __table_args__ = (
+        Index("ix_taaj_created_at", "created_at"),
+        Index("ix_taaj_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    triggered_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    token_type: Mapped[str] = mapped_column(Text, nullable=False, default="all")
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    analyzed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_cached: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[AiJobStatus] = mapped_column(
+        Enum(AiJobStatus, name="aijobstatus", create_constraint=True),
+        nullable=False,
+        default=AiJobStatus.pending,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    progress_pct: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     user: Mapped["User | None"] = relationship()
