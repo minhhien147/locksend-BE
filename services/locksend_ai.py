@@ -46,6 +46,7 @@ def _default_ai_dir() -> str:
 _env_dir = os.getenv("LOCKSEND_AI_DIR", "").strip()
 LOCKSEND_AI_DIR = (_env_dir if _env_dir else _default_ai_dir()).replace("\\", "/")
 LOCKSEND_AI_TIMEOUT = float(os.getenv("LOCKSEND_AI_TIMEOUT", "30"))
+MAX_PARALLEL_BATCHES = max(1, int(os.getenv("LOCKSEND_AI_MAX_PARALLEL_BATCHES", "4")))
 
 REMOTE_MODE = bool(LOCKSEND_AI_URL)
 
@@ -56,6 +57,7 @@ if not REMOTE_MODE and LOCKSEND_AI_DIR not in sys.path:
 # Created lazily; closed by close_http_client() in FastAPI lifespan shutdown.
 _http_client: httpx.AsyncClient | None = None
 _http_client_lock = asyncio.Lock()
+_parallel_sem = asyncio.Semaphore(MAX_PARALLEL_BATCHES)
 
 
 async def _get_http_client() -> httpx.AsyncClient:
@@ -282,7 +284,13 @@ async def analyze_token(metric: dict[str, Any]) -> dict[str, Any]:
     return _local_analyze_token(metric)
 
 
-async def analyze_batch(metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def analyze_batch(
+    metrics: list[dict[str, Any]],
+    *,
+    skip_cache: bool = False,
+) -> list[dict[str, Any]]:
+    # `skip_cache` được giữ để tương thích với router/background job mới.
+    _ = skip_cache
     if REMOTE_MODE:
         features_list = [_token_metric_to_cic(m) for m in metrics]
         try:
