@@ -257,6 +257,15 @@ async def jwt_access_log_middleware(request: Request, call_next):
 
 @app.get("/health", tags=["ops"])
 async def health():
+    # Railway healthcheck phải phản hồi thật nhanh; không gọi service ngoài ở đây.
+    return {
+        "status": "ok",
+        "service": "secure-file-sharing-backend",
+    }
+
+
+@app.get("/health/deps", tags=["ops"])
+async def health_deps():
     from services import locksend_ai
 
     ai = await locksend_ai.health()
@@ -283,4 +292,5 @@ def root():
         "service": "secure-file-sharing-backend",
         "docs": "/docs",
         "health": "/health",
+        "deps_health": "/health/deps",
     }
