@@ -357,6 +357,10 @@ async def _run_ai_analysis_job(
             # ── Critical fix: Job ALL FAILED? → status=FAILED + error_message!
             fail_rate = failed / max(total_requested, 1)
             all_zero = (total_analyzed_ok == 0 and total_requested > 0)
+            first_error = next(
+                (str(r.get("error")) for r in ai_results if r.get("error")),
+                None,
+            )
             if fail_rate >= 0.5 or all_zero:
                 job.status = AiJobStatus.failed
                 job.error_message = (
@@ -365,6 +369,8 @@ async def _run_ai_analysis_job(
                     f"Skipped recent: {skipped_recent}. "
                     "Kiểm tra locksend-ai server (remote) hoặc model.pkl (local)."
                 )
+                if first_error:
+                    job.error_message += f" First error: {first_error}"
             else:
                 job.status = AiJobStatus.completed
             job.progress_pct = 100

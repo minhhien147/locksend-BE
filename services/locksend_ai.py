@@ -268,6 +268,28 @@ async def _remote_analyze_token(metric: dict[str, Any]) -> dict[str, Any]:
     return _normalize_result(res.json(), metric)
 
 
+async def _remote_analyze_batch_fallback(
+    metrics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Fallback khi endpoint /analyze/batch lỗi hoặc timeout:
+    gọi /analyze từng token để không làm hỏng cả job.
+    """
+    results: list[dict[str, Any]] = []
+    for metric in metrics:
+        try:
+            results.append(await _remote_analyze_token(metric))
+        except Exception as exc:
+            results.append(
+                {
+                    "token_id": metric.get("token_id"),
+                    "token_type": metric.get("token_type"),
+                    "error": str(exc),
+                }
+            )
+    return results
+
+
 def _local_analyze_token(metric: dict[str, Any]) -> dict[str, Any]:
     _ensure_loaded()
     assert _bundle is not None
@@ -303,7 +325,11 @@ async def analyze_batch(
             res.raise_for_status()
             raw_results = res.json().get("results", [])
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"LockSend AI remote error: {exc}") from exc
+            logger.warning(
+                "LockSend AI batch endpoint failed, fallback to single-token analyze: %s",
+                exc,
+            )
+            return await _remote_analyze_batch_fallback(metrics)
 
         results: list[dict[str, Any]] = []
         for metric, raw in zip(metrics, raw_results):
