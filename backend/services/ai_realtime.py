@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.dependencies import get_db_context
@@ -221,6 +221,8 @@ async def bulk_save_manual_snapshots(
 
 
 INCREMENTAL_WINDOW_SEC = int(os.getenv("LOCKSEND_AI_INCREMENTAL_WINDOW", "1800"))  # mặc định 30 phút
+BENIGN_DECISIONS = {"ALLOW"}
+BENIGN_AI_LEVELS = {"NORMAL", "LOW"}
 
 
 async def find_recently_analyzed_token_refs(
@@ -240,6 +242,50 @@ async def find_recently_analyzed_token_refs(
         .where(
             TokenAiScoreSnapshot.token_ref.in_(token_refs),
             TokenAiScoreSnapshot.created_at >= cutoff,
+        )
+        .distinct()
+    )
+    rows = (await db.execute(q)).scalars().all()
+    return set(rows)
+
+
+async def find_skippable_benign_token_refs(
+    db: AsyncSession,
+    *,
+    token_refs: list[str],
+) -> set[str]:
+    """
+    Trả về set token_ref mà snapshot MỚI NHẤT đang là benign.
+    Dùng cho bulk AI analyze: token đã được chấm ALLOW / LOW / NORMAL
+    sẽ được bỏ qua ở lần chạy sau, trừ khi force_all=True.
+    """
+    if not token_refs:
+        return set()
+
+    latest_snapshots = (
+        select(
+            TokenAiScoreSnapshot.token_ref.label("token_ref"),
+            func.max(TokenAiScoreSnapshot.created_at).label("latest_at"),
+        )
+        .where(TokenAiScoreSnapshot.token_ref.in_(token_refs))
+        .group_by(TokenAiScoreSnapshot.token_ref)
+        .subquery()
+    )
+
+    q = (
+        select(TokenAiScoreSnapshot.token_ref)
+        .join(
+            latest_snapshots,
+            and_(
+                TokenAiScoreSnapshot.token_ref == latest_snapshots.c.token_ref,
+                TokenAiScoreSnapshot.created_at == latest_snapshots.c.latest_at,
+            ),
+        )
+        .where(
+            or_(
+                func.upper(TokenAiScoreSnapshot.decision).in_(BENIGN_DECISIONS),
+                func.upper(TokenAiScoreSnapshot.ai_level).in_(BENIGN_AI_LEVELS),
+            )
         )
         .distinct()
     )

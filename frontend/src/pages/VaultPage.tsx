@@ -57,6 +57,7 @@ function VaultFileRow({
     fileName,
     chunkProgress,
     downloadVaultFile,
+    cancel,
     reset,
   } = useDownload();
   const [busy, setBusy] = useState(false);
@@ -68,6 +69,7 @@ function VaultFileRow({
     try {
       await downloadVaultFile(file.file_id, file.encryption_metadata);
     } catch (e: unknown) {
+      if ((e as Error)?.message === "CANCELLED") return;
       const msg =
         (e as { response?: { data?: { detail?: string } } })?.response?.data
           ?.detail ?? (e as Error).message;
@@ -94,13 +96,13 @@ function VaultFileRow({
     busy || delBusy || stage === "downloading" || stage === "decrypting";
 
   return (
-    <div className="bg-white/[0.03] border border-white/[0.07] rounded-2xl p-4 space-y-3">
+    <div className="rounded-2xl border border-white/10 bg-slate-950/88 shadow-[0_10px_30px_rgba(0,0,0,0.28)] p-4 space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <p className="font-medium text-sm truncate text-white/90">
             {file.original_filename}
           </p>
-          <p className="text-xs text-white/35 mt-0.5">
+          <p className="text-xs text-white/50 mt-0.5">
             {formatBytes(file.file_size_bytes)}
             {file.chunk_count > 1 ? ` · ${file.chunk_count} chunks` : ""}
             {" · "}
@@ -143,6 +145,11 @@ function VaultFileRow({
             t("vault.download")
           )}
         </Button>
+        {(stage === "downloading" || stage === "decrypting") && (
+          <Button variant="secondary" disabled={delBusy} onClick={cancel}>
+            {t("common.cancel")}
+          </Button>
+        )}
         <Button
           variant="secondary"
           disabled={isWorking || !file.can_share}
@@ -191,8 +198,13 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
 
-  const { encryptAndUpload, stage, error: uploadError, reset: resetUpload } =
-    useUpload();
+  const {
+    encryptAndUpload,
+    stage,
+    error: uploadError,
+    cancel: cancelUpload,
+    reset: resetUpload,
+  } = useUpload();
   const uploading = stage === "encrypting" || stage === "uploading";
 
   const loadAll = useCallback(async () => {
@@ -378,6 +390,20 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               <p className={`text-sm ${text.secondary}`}>{t("vault.dropzone")}</p>
             )}
           </div>
+
+          {uploading && (
+            <div className="flex justify-end">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  cancelUpload();
+                  setUploadQueue([]);
+                }}
+              >
+                {t("common.cancel")}
+              </Button>
+            </div>
+          )}
 
           {uploadError && <Alert tone="error">{uploadError}</Alert>}
 

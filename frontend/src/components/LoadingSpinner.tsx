@@ -3,10 +3,17 @@
 type SpinnerSize = "xs" | "sm" | "md" | "lg";
 
 const SPINNER_BOX: Record<SpinnerSize, string> = {
-  xs: "h-3.5 w-3.5 border-[1.5px]",
-  sm: "h-4 w-4 border-2",
-  md: "h-10 w-10 border-[3px]",
-  lg: "h-14 w-14 border-[3px]",
+  xs: "h-3.5 w-3.5",
+  sm: "h-4 w-4",
+  md: "h-10 w-10",
+  lg: "h-14 w-14",
+};
+
+const SPINNER_RING: Record<SpinnerSize, string> = {
+  xs: "border-[1.5px]",
+  sm: "border-2",
+  md: "border-[3px]",
+  lg: "border-[3px]",
 };
 
 type LoadingSpinnerProps = {
@@ -22,9 +29,11 @@ export function LoadingSpinner({ size = "md", className = "", decorative = true 
       className={`relative inline-flex shrink-0 ${SPINNER_BOX[size]} ${className}`}
       {...(decorative ? { "aria-hidden": true as const } : {})}
     >
-      <div className="absolute inset-0 rounded-full border-slate-200 dark:border-slate-700" />
       <div
-        className="absolute inset-0 animate-spin rounded-full border-transparent border-t-indigo-600 dark:border-t-indigo-400 motion-reduce:animate-none"
+        className={`absolute inset-0 rounded-full ${SPINNER_RING[size]} border-slate-300/70 dark:border-slate-700/90`}
+      />
+      <div
+        className={`absolute inset-0 animate-spin rounded-full ${SPINNER_RING[size]} border-transparent border-t-indigo-500 border-r-cyan-400 motion-reduce:animate-none will-change-transform`}
         style={{ animationDuration: "0.75s" }}
       />
     </div>

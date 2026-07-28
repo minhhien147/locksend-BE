@@ -130,9 +130,10 @@ export async function uploadEncryptedFile(
   ciphertext: Uint8Array,
   metadata: EncryptionMetadata,
   fileName: string,
-  onProgress?: (percent: number) => void,
+  onProgress?: (loaded: number, total: number) => void,
   recipients?: RecipientPayload[],
-  options?: { storageMode?: StorageMode; folderId?: string | null }
+  options?: { storageMode?: StorageMode; folderId?: string | null },
+  signal?: AbortSignal
 ): Promise<UploadResponse> {
   const formData = new FormData();
   const blob = new Blob([new Uint8Array(ciphertext)], {
@@ -151,8 +152,9 @@ export async function uploadEncryptedFile(
   const response = await api.post<UploadResponse>("/upload", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     onUploadProgress: onProgress
-      ? (e) => onProgress(e.total ? Math.round((e.loaded / e.total) * 100) : 0)
+      ? (e) => onProgress(e.loaded, e.total ?? ciphertext.byteLength)
       : undefined,
+    signal,
   });
   return response.data;
 }
@@ -160,13 +162,15 @@ export async function uploadEncryptedFile(
 // ── Multipart upload ──────────────────────────────────────────────────────────
 
 export async function initMultipartUpload(
-  fileName: string
+  fileName: string,
+  signal?: AbortSignal
 ): Promise<MultipartInitResponse> {
   const formData = new FormData();
   formData.append("filename", fileName);
   const response = await api.post<MultipartInitResponse>(
     "/upload/multipart/init",
-    formData
+    formData,
+    { signal }
   );
   return response.data;
 }
@@ -175,7 +179,8 @@ export async function uploadChunk(
   blobName: string,
   chunkIndex: number,
   chunkData: Uint8Array,
-  onProgress?: (percent: number) => void
+  onProgress?: (loaded: number, total: number) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   const formData = new FormData();
   const blob = new Blob([chunkData.buffer as ArrayBuffer], {
@@ -189,8 +194,9 @@ export async function uploadChunk(
     {
       headers: { "Content-Type": "multipart/form-data" },
       onUploadProgress: onProgress
-        ? (e) => onProgress(e.total ? Math.round((e.loaded / e.total) * 100) : 0)
+        ? (e) => onProgress(e.loaded, e.total ?? chunkData.byteLength)
         : undefined,
+      signal,
     }
   );
 }
@@ -200,7 +206,8 @@ export async function finalizeMultipartUpload(
   chunkCount: number,
   metadata: ChunkedEncryptionMetadata,
   recipients?: RecipientPayload[],
-  options?: { storageMode?: StorageMode; folderId?: string | null }
+  options?: { storageMode?: StorageMode; folderId?: string | null },
+  signal?: AbortSignal
 ): Promise<UploadResponse> {
   const response = await api.post<UploadResponse>(
     `/upload/multipart/${encodeURIComponent(blobName)}/finalize`,
@@ -210,7 +217,8 @@ export async function finalizeMultipartUpload(
       recipients: recipients ?? [],
       storage_mode: options?.storageMode ?? "share",
       folder_id: options?.storageMode === "vault" ? options.folderId ?? null : null,
-    }
+    },
+    { signal }
   );
   return response.data;
 }
@@ -255,11 +263,13 @@ export async function resolveCiphertextInfoBySas(sasUrl: string): Promise<{
 export async function downloadCiphertextChunk(
   fileId: string,
   chunkIndex: number,
-  sasUrl?: string
+  sasUrl?: string,
+  signal?: AbortSignal
 ): Promise<Uint8Array> {
   const response = await api.get(`/files/${fileId}/ciphertext/chunks/${chunkIndex}`, {
     responseType: "arraybuffer",
     params: sasUrl ? { sas_url: sasUrl } : undefined,
+    signal,
   });
   return new Uint8Array(response.data as ArrayBuffer);
 }
@@ -267,7 +277,9 @@ export async function downloadCiphertextChunk(
 /** Tải ciphertext từ SAS URL qua backend proxy (tránh CORS Azure). */
 export async function downloadCiphertext(
   sasUrl: string,
-  fallbackMetadata?: Record<string, unknown>
+  fallbackMetadata?: Record<string, unknown>,
+  onProgress?: (loaded: number, total: number | null) => void,
+  signal?: AbortSignal
 ): Promise<{
   ciphertext: Uint8Array;
   metadata: EncryptionMetadata;
@@ -276,7 +288,13 @@ export async function downloadCiphertext(
   const response = await api.post(
     "/files/ciphertext/by-sas",
     { sas_url: sasUrl },
-    { responseType: "arraybuffer" }
+    {
+      responseType: "arraybuffer",
+      onDownloadProgress: onProgress
+        ? (e) => onProgress(e.loaded, e.total ?? null)
+        : undefined,
+      signal,
+    }
   );
   const headers = response.headers as Record<string, unknown>;
   const metadata =
@@ -291,7 +309,9 @@ export async function downloadCiphertext(
 /** Tải ciphertext file kho qua backend (tránh CORS Azure). */
 export async function downloadVaultCiphertext(
   fileId: string,
-  fallbackMetadata?: Record<string, unknown>
+  fallbackMetadata?: Record<string, unknown>,
+  onProgress?: (loaded: number, total: number | null) => void,
+  signal?: AbortSignal
 ): Promise<{
   ciphertext: Uint8Array;
   metadata: EncryptionMetadata;
@@ -299,6 +319,10 @@ export async function downloadVaultCiphertext(
 }> {
   const response = await api.get(`/vault/files/${fileId}/ciphertext`, {
     responseType: "arraybuffer",
+    onDownloadProgress: onProgress
+      ? (e) => onProgress(e.loaded, e.total ?? null)
+      : undefined,
+    signal,
   });
   const headers = response.headers as Record<string, unknown>;
   const metadata = _parseEncryptionMetadataFromHeaders(headers, fallbackMetadata);

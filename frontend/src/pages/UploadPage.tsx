@@ -35,6 +35,7 @@ import {
   panel,
 } from "../styles/theme";
 import { useT } from "../i18n/context";
+import TransferProgressPanel from "../components/TransferProgressPanel";
 
 const formatFileSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
@@ -101,9 +102,10 @@ export default function UploadPage() {
     sasUrl,
     error,
     chunkProgress,
-    uploadPercent,
     isChunkedMode,
+    transferStats,
     encryptAndUpload,
+    cancel,
     reset,
   } = useUpload();
 
@@ -440,54 +442,68 @@ export default function UploadPage() {
 
       {error && <Alert tone="error">{error}</Alert>}
 
-      {isBusy && chunkProgress && <ChunkProgressBar progress={chunkProgress} t={t} />}
-      {isBusy && !chunkProgress && uploadPercent > 0 && (
-        <Card padding="sm" className="space-y-2">
-          <div className={`flex justify-between text-xs ${text.muted}`}>
-            <span>{t("upload.uploadCiphertext")}</span>
-            <span className="font-medium text-indigo-600 dark:text-indigo-400">{uploadPercent}%</span>
-          </div>
-          <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-1.5">
-            <div className="bg-blue-700 dark:bg-blue-600 h-1.5 rounded-full transition-all" style={{ width: `${uploadPercent}%` }} />
-          </div>
-        </Card>
+      {isBusy && transferStats && (
+        <TransferProgressPanel
+          stats={transferStats}
+          label={
+            stage === "encrypting"
+              ? isChunkedMode
+                ? t("upload.encryptingChunk", { mb: CHUNK_MB })
+                : t("upload.encrypting")
+              : isChunkedMode
+                ? t("upload.multipartUpload")
+                : t("upload.uploadCiphertext")
+          }
+          showSpeed={stage === "uploading"}
+          showBar={stage === "uploading" && !chunkProgress}
+          barClassName="bg-blue-700 dark:bg-blue-600"
+        />
       )}
 
-      <Button
-        fullWidth
-        loading={isBusy}
-        disabled={
-          isBusy ||
-          !canUseKeys ||
-          !file ||
-          (uploadPurpose === "share" &&
-            recipientMode === "search" &&
-            (selectedRecipients.length === 0 || keyLoading)) ||
-          (uploadPurpose === "share" &&
-            recipientMode === "manual" &&
-            !recipientPublicKey.trim())
-        }
-        onClick={() =>
-          encryptAndUpload(
-            file,
-            recipientMode === "search" ? selectedRecipients : [],
-            recipientMode === "manual" ? recipientPublicKey : undefined,
-            { purpose: uploadPurpose, folderId: vaultFolderId }
-          )
-        }
-      >
-        {stage === "encrypting"
-          ? isChunkedMode
-            ? t("upload.encryptingChunk", { mb: CHUNK_MB })
-            : t("upload.encrypting")
-          : stage === "uploading"
+      {isBusy && chunkProgress && <ChunkProgressBar progress={chunkProgress} t={t} />}
+
+      <div className="flex gap-3">
+        <Button
+          fullWidth
+          loading={isBusy}
+          disabled={
+            isBusy ||
+            !canUseKeys ||
+            !file ||
+            (uploadPurpose === "share" &&
+              recipientMode === "search" &&
+              (selectedRecipients.length === 0 || keyLoading)) ||
+            (uploadPurpose === "share" &&
+              recipientMode === "manual" &&
+              !recipientPublicKey.trim())
+          }
+          onClick={() =>
+            void encryptAndUpload(
+              file,
+              recipientMode === "search" ? selectedRecipients : [],
+              recipientMode === "manual" ? recipientPublicKey : undefined,
+              { purpose: uploadPurpose, folderId: vaultFolderId }
+            ).catch(() => {})
+          }
+        >
+          {stage === "encrypting"
             ? isChunkedMode
-              ? t("upload.multipartUpload")
-              : t("upload.uploading")
-            : uploadPurpose === "vault"
-              ? t("upload.saveVault")
-              : t("upload.encryptUpload")}
-      </Button>
+              ? t("upload.encryptingChunk", { mb: CHUNK_MB })
+              : t("upload.encrypting")
+            : stage === "uploading"
+              ? isChunkedMode
+                ? t("upload.multipartUpload")
+                : t("upload.uploading")
+              : uploadPurpose === "vault"
+                ? t("upload.saveVault")
+                : t("upload.encryptUpload")}
+        </Button>
+        {isBusy && (
+          <Button variant="secondary" onClick={cancel}>
+            {t("common.cancel")}
+          </Button>
+        )}
+      </div>
 
     </div>
   );

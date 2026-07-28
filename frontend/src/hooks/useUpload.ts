@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   encryptFile,
   encryptFileForRecipients,
@@ -23,6 +23,8 @@ import {
   type RecipientPayload,
 } from "../utils/api";
 import { useT } from "../i18n/context";
+import { useTransferTimer } from "./useTransferTimer";
+import { computeTransferStats, type TransferStats } from "../utils/transferStats";
 
 export type UploadStage = "idle" | "encrypting" | "uploading" | "done" | "error";
 
@@ -41,6 +43,8 @@ export interface UseUploadState {
   uploadPercent: number;
   plaintextChecksum: string;
   recipientCount: number;
+  bytesTransferred: number;
+  bytesTotal: number;
 }
 
 /** Người nhận đã chọn (tìm user — có userId cho Hộp nhận) */
@@ -62,12 +66,14 @@ export interface UploadOptions {
 export interface UseUploadReturn extends UseUploadState {
   isChunkedMode: boolean;
   chunkCount: number;
+  transferStats: TransferStats | null;
   encryptAndUpload: (
     file: File | null,
     recipients: RecipientUser[],
     manualPublicKey?: string,
     options?: UploadOptions
   ) => Promise<void>;
+  cancel: () => void;
   reset: () => void;
 }
 
@@ -79,6 +85,8 @@ const initialState: UseUploadState = {
   uploadPercent: 0,
   plaintextChecksum: "",
   recipientCount: 0,
+  bytesTransferred: 0,
+  bytesTotal: 0,
 };
 
 function buildRecipientPayloads(
@@ -98,12 +106,47 @@ export function useUpload(): UseUploadReturn {
   const t = useT();
   const [state, setState] = useState<UseUploadState>(initialState);
   const [currentFile, setCurrentFile] = useState<File | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const transferActive = state.stage === "encrypting" || state.stage === "uploading";
+  const { startedAt, tick } = useTransferTimer(transferActive);
+  const transferStats = computeTransferStats(
+    state.bytesTransferred,
+    state.bytesTotal,
+    startedAt,
+    tick
+  );
 
   const isChunkedMode =
     currentFile !== null && currentFile.size >= CHUNKED_THRESHOLD;
   const chunkCount = currentFile
     ? Math.ceil(currentFile.size / DEFAULT_CHUNK_SIZE)
     : 0;
+
+  function isAbortError(err: unknown): boolean {
+    const anyErr = err as { name?: string; code?: string; message?: string };
+    if (abortRef.current?.signal.aborted) return true;
+    if (anyErr?.code === "ERR_CANCELED") return true;
+    if (anyErr?.name === "CanceledError") return true;
+    if (typeof anyErr?.message === "string" && anyErr.message.toLowerCase().includes("canceled")) {
+      return true;
+    }
+    return false;
+  }
+
+  function cancel() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setState((prev) => ({
+      ...prev,
+      stage: "idle",
+      sasUrl: "",
+      error: "",
+      chunkProgress: null,
+      uploadPercent: 0,
+      bytesTransferred: 0,
+      bytesTotal: currentFile?.size ?? 0,
+    }));
+  }
 
   async function encryptAndUpload(
     file: File | null,
@@ -156,6 +199,9 @@ export function useUpload(): UseUploadReturn {
     }
 
     setCurrentFile(file);
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
     setState({
       stage: "encrypting",
       sasUrl: "",
@@ -164,9 +210,12 @@ export function useUpload(): UseUploadReturn {
       uploadPercent: 0,
       plaintextChecksum: "",
       recipientCount: multiCount,
+      bytesTransferred: 0,
+      bytesTotal: file.size,
     });
 
     try {
+      if (signal.aborted) throw new Error("CANCELLED");
       if (file.size < CHUNKED_THRESHOLD) {
         let ciphertext: Uint8Array;
         let checksum: string;
@@ -236,19 +285,24 @@ export function useUpload(): UseUploadReturn {
           ...prev,
           stage: "uploading",
           plaintextChecksum: checksum,
+          bytesTotal: ciphertext.byteLength,
+          bytesTransferred: 0,
         }));
 
         const result = await uploadEncryptedFile(
           ciphertext,
           uploadMetadata,
           file.name,
-          (pct) =>
+          (loaded, total) =>
             setState((prev) => ({
               ...prev,
-              uploadPercent: pct,
+              uploadPercent: total ? Math.round((loaded / total) * 100) : 0,
+              bytesTransferred: loaded,
+              bytesTotal: total,
             })),
           recipientPayloads,
-          storageOpts
+          storageOpts,
+          signal
         );
 
         setState((prev) => ({
@@ -276,15 +330,17 @@ export function useUpload(): UseUploadReturn {
         const totalChunks = Math.ceil(file.size / DEFAULT_CHUNK_SIZE);
         setState((prev) => ({ ...prev, stage: "uploading" }));
 
-        const { blob_name } = await initMultipartUpload(file.name);
+        const { blob_name } = await initMultipartUpload(file.name, signal);
         const chunkChecksums: string[] = [];
 
         for (let i = 0; i < totalChunks; i++) {
+          if (signal.aborted) throw new Error("CANCELLED");
           const start = i * DEFAULT_CHUNK_SIZE;
           const end = Math.min(start + DEFAULT_CHUNK_SIZE, file.size);
           const chunkSizeMB = parseFloat(
             ((end - start) / (1024 * 1024)).toFixed(1)
           );
+          const chunkPlainBytes = end - start;
 
           setState((prev) => ({
             ...prev,
@@ -294,9 +350,12 @@ export function useUpload(): UseUploadReturn {
               total: totalChunks,
               currentMB: chunkSizeMB,
             },
+            bytesTransferred: start,
+            bytesTotal: file.size,
           }));
 
           const chunkBuffer = await file.slice(start, end).arrayBuffer();
+          if (signal.aborted) throw new Error("CANCELLED");
           chunkChecksums.push(await computeSHA256Hex(chunkBuffer));
           const encryptedChunk = await encryptChunk(
             aesKey,
@@ -304,6 +363,7 @@ export function useUpload(): UseUploadReturn {
             baseNonce,
             i
           );
+          if (signal.aborted) throw new Error("CANCELLED");
 
           setState((prev) => ({
             ...prev,
@@ -313,8 +373,23 @@ export function useUpload(): UseUploadReturn {
               total: totalChunks,
               currentMB: chunkSizeMB,
             },
+            bytesTransferred: start,
           }));
-          await uploadChunk(blob_name, i, encryptedChunk);
+          await uploadChunk(
+            blob_name,
+            i,
+            encryptedChunk,
+            (loaded, total) =>
+              setState((prev) => ({
+                ...prev,
+                bytesTransferred: start + Math.round((loaded / total) * chunkPlainBytes),
+              })),
+            signal
+          );
+          setState((prev) => ({
+            ...prev,
+            bytesTransferred: end,
+          }));
         }
 
         const partialMeta = {
@@ -355,7 +430,8 @@ export function useUpload(): UseUploadReturn {
           totalChunks,
           vaultMeta,
           multipartRecipients,
-          storageOpts
+          storageOpts,
+          signal
         );
 
         setState((prev) => ({
@@ -367,6 +443,10 @@ export function useUpload(): UseUploadReturn {
         }));
       }
     } catch (e) {
+      if (isAbortError(e) || (e as Error)?.message === "CANCELLED") {
+        cancel();
+        throw new Error("CANCELLED");
+      }
       const msg = (e as Error)?.message ?? t("common.unknownError");
       setState((prev) => ({
         ...prev,
@@ -375,10 +455,14 @@ export function useUpload(): UseUploadReturn {
         chunkProgress: null,
       }));
       throw new Error(msg);
+    } finally {
+      abortRef.current = null;
     }
   }
 
   function reset() {
+    abortRef.current?.abort();
+    abortRef.current = null;
     setCurrentFile(null);
     setState(initialState);
   }
@@ -387,7 +471,9 @@ export function useUpload(): UseUploadReturn {
     ...state,
     isChunkedMode,
     chunkCount,
+    transferStats,
     encryptAndUpload,
+    cancel,
     reset,
   };
 }

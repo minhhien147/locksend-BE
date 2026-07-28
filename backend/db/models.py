@@ -69,6 +69,8 @@ class User(Base):
     email: Mapped[str | None] = mapped_column(Text, unique=True)
     display_name: Mapped[str | None] = mapped_column(Text)
     role: Mapped[str] = mapped_column(Text, nullable=False, default="owner")
+    storage_plan: Mapped[str] = mapped_column(Text, nullable=False, default="free")
+    vault_quota_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

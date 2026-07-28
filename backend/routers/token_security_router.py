@@ -95,11 +95,11 @@ class AiAnalyzeRequest(BaseModel):
     )
     skip_recent: bool = Field(
         default=True,
-        description="Bỏ qua các token đã được phân tích trong vòng INCREMENTAL_WINDOW (tăng tốc)",
+        description="Bỏ qua các token mà snapshot gần nhất đang benign (ALLOW / LOW / NORMAL)",
     )
     force_all: bool = Field(
         default=False,
-        description="Bỏ qua cache và incremental check — phân tích lại toàn bộ từ đầu",
+        description="Bỏ qua mọi skip logic — phân tích lại toàn bộ token từ đầu",
     )
 
 
@@ -107,6 +107,72 @@ class AiAnalyzeRequest(BaseModel):
 
 def _metric_ref(m: dict[str, Any]) -> str:
     return str(m.get("token_id") or m.get("user_id") or "")
+
+
+def _is_currently_skippable(metric: dict[str, Any]) -> bool:
+    """
+    Chỉ skip khi token đang ở trạng thái an toàn theo rule engine hiện tại.
+    Tránh việc snapshot AI cũ là benign nhưng token hiện tại đã lên high/critical.
+    """
+    recommendation = str(metric.get("recommendation") or "").upper()
+    risk_level = str(metric.get("risk_level") or "").lower()
+    risk_score = int(metric.get("risk_score") or 0)
+    return recommendation == "ALLOW" or risk_level == "low" or risk_score < 40
+
+
+async def _build_metric_lookups(db: AsyncSession) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    jwt_metrics = await token_security.get_jwt_token_metrics(db)
+    sas_metrics = await token_security.get_sas_token_metrics(db, include_expired=True, limit=500)
+    jwt_by_user = {
+        str(metric.get("user_id")): metric
+        for metric in jwt_metrics
+        if metric.get("user_id")
+    }
+    sas_by_token = {
+        str(metric.get("token_id")): metric
+        for metric in sas_metrics
+        if metric.get("token_id")
+    }
+    return jwt_by_user, sas_by_token
+
+
+def _serialize_snapshot(
+    snapshot: TokenAiScoreSnapshot,
+    metric: dict[str, Any] | None,
+) -> dict[str, Any]:
+    subject_label = (
+        (metric or {}).get("email")
+        or (metric or {}).get("blob_name")
+        or snapshot.token_ref
+    )
+    return {
+        "id": str(snapshot.id),
+        "token_type": snapshot.token_type,
+        "token_ref": snapshot.token_ref,
+        "user_id": snapshot.user_id,
+        "subject_label": subject_label,
+        "email": (metric or {}).get("email"),
+        "blob_name": (metric or {}).get("blob_name"),
+        "role": (metric or {}).get("role"),
+        "file_id": (metric or {}).get("file_id"),
+        "rule_score": snapshot.rule_score,
+        "rule_level": (metric or {}).get("risk_level"),
+        "rule_recommendation": (metric or {}).get("recommendation"),
+        "rule_reasons": list((metric or {}).get("reasons") or []),
+        "ai_score_pct": snapshot.ai_score_pct,
+        "ai_level": snapshot.ai_level,
+        "decision": snapshot.decision,
+        "active_sessions": (metric or {}).get("active_sessions"),
+        "access_count": (metric or {}).get("access_count"),
+        "ip_count": (metric or {}).get("ip_count"),
+        "accesses_per_hour": (metric or {}).get("accesses_per_hour"),
+        "downloads_per_hour": (metric or {}).get("downloads_per_hour"),
+        "token_age_hours": (metric or {}).get("token_age_hours"),
+        "is_revoked": (metric or {}).get("is_revoked"),
+        "is_expired": (metric or {}).get("is_expired"),
+        "source": snapshot.source,
+        "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+    }
 
 
 async def _analyze_metrics_in_parallel_batches(
@@ -204,7 +270,7 @@ async def _run_ai_analysis_job(
     """
     Background coroutine — chạy full pipeline, cập nhật job progress liên tục.
     Pipeline:
-      1. Incremental filter (lọc bỏ tokens đã snapshot gần đây, nếu skip_recent=True)
+      1. Benign skip filter (bỏ qua tokens có snapshot gần nhất là benign, nếu skip_recent=True)
       2. Parallel batches qua AI (có cache nếu không force_all)
       3. Bulk save snapshots vào DB
       4. Cập nhật job status = completed / failed
@@ -228,31 +294,29 @@ async def _run_ai_analysis_job(
             await db.flush()
             await db.commit()
 
-            # ── Step 1: Incremental filter ────────────────────────────
+            # ── Step 1: Benign skip filter ────────────────────────────
             refs = [_metric_ref(m) for m in selected_metrics]
-            skip_incremental_refs: set[str] = set()
+            skip_benign_refs: set[str] = set()
             if skip_recent and not force_all:
                 try:
                     job.progress_pct = 2
                     job.error_message = None
                     await db.flush()
                     await db.commit()
-                    skip_incremental_refs = (
-                        await ai_realtime.find_recently_analyzed_token_refs(
-                            db, token_refs=refs
-                        )
+                    skip_benign_refs = await ai_realtime.find_skippable_benign_token_refs(
+                        db, token_refs=refs
                     )
                 except Exception as q_err:
-                    logger.warning("incremental query failed, skip filter: %s", q_err)
+                    logger.warning("benign-skip query failed, continue full analyze: %s", q_err)
 
             to_analyze: list[dict[str, Any]] = []
-            skipped_recent = 0
+            skipped_benign = 0
             for m in selected_metrics:
-                if _metric_ref(m) in skip_incremental_refs:
-                    skipped_recent += 1
+                if _metric_ref(m) in skip_benign_refs and _is_currently_skippable(m):
+                    skipped_benign += 1
                 else:
                     to_analyze.append(m)
-            job.skipped_cached = skipped_recent
+            job.skipped_cached = skipped_benign
             if to_analyze:
                 job.progress_pct = 5
             else:
@@ -261,7 +325,8 @@ async def _run_ai_analysis_job(
                 job.completed_at = _aware_now()
                 job.result_summary = {
                     "total_requested": len(selected_metrics),
-                    "skipped_recent": skipped_recent,
+                    "skipped_recent": skipped_benign,
+                    "skipped_benign": skipped_benign,
                     "skipped_cache": 0,
                     "ai_analyzed": 0,
                     "failed": 0,
@@ -327,7 +392,7 @@ async def _run_ai_analysis_job(
 
             job.analyzed_count = len(ai_results) - failed
             job.failed_count = failed
-            job.skipped_cached = skipped_recent + cache_hit
+            job.skipped_cached = skipped_benign + cache_hit
             job.progress_pct = 95
             await db.flush()
 
@@ -340,13 +405,14 @@ async def _run_ai_analysis_job(
             revoke_count = sum(
                 1
                 for r in ai_results
-                if not r.get("error") and str(r.get("decision") or "") == "REVOKE"
+                if not r.get("error") and str(r.get("decision") or "") in ("REVIEW", "REVOKE")
             )
             total_requested = len(selected_metrics)
             total_analyzed_ok = max(0, len(ai_results) - failed)
             job.result_summary = {
                 "total_requested": total_requested,
-                "skipped_recent": skipped_recent,
+                "skipped_recent": skipped_benign,
+                "skipped_benign": skipped_benign,
                 "skipped_cache": cache_hit,
                 "ai_analyzed": total_analyzed_ok,
                 "failed": failed,
@@ -366,7 +432,7 @@ async def _run_ai_analysis_job(
                 job.error_message = (
                     f"Analysis failed: analyzed 0/{total_requested} tokens OK. "
                     f"fail_rate={fail_rate*100:.0f}%. "
-                    f"Skipped recent: {skipped_recent}. "
+                    f"Skipped benign: {skipped_benign}. "
                     "Kiểm tra locksend-ai server (remote) hoặc model.pkl (local)."
                 )
                 if first_error:
@@ -378,7 +444,7 @@ async def _run_ai_analysis_job(
             await db.commit()
             logger.info(
                 "Job %s %s. total=%d ai_ok=%d failed=%d skipped=%d saved_snapshots=%d",
-                job_id, job.status, total_requested, total_analyzed_ok, failed, skipped_recent, saved,
+                job_id, job.status, total_requested, total_analyzed_ok, failed, skipped_benign, saved,
             )
     except Exception as exc:
         logger.exception("Job %s crashed at outer try: %s", job_id, exc)
@@ -816,28 +882,31 @@ async def ai_get_job_detail(
     }
 
     if include_details and snapshots_limit > 0:
-        # Lấy các snapshot gần nhất sau thời điểm job khởi tạo
+        # Lấy snapshot nằm trong cửa sổ thời gian của job để tách report theo từng lần chạy.
         snap_q = select(TokenAiScoreSnapshot).order_by(desc(TokenAiScoreSnapshot.created_at))
         if job.created_at is not None:
             from datetime import timedelta
             window_start = job.created_at - timedelta(seconds=30)
             snap_q = snap_q.where(TokenAiScoreSnapshot.created_at >= window_start)
+            if job.completed_at is not None:
+                window_end = job.completed_at + timedelta(seconds=30)
+                snap_q = snap_q.where(TokenAiScoreSnapshot.created_at <= window_end)
         snap_q = snap_q.limit(snapshots_limit)
         snaps = (await db.execute(snap_q)).scalars().all()
+        seen_refs: set[str] = set()
+        deduped_snaps: list[TokenAiScoreSnapshot] = []
+        for s in snaps:
+            if s.token_ref in seen_refs:
+                continue
+            seen_refs.add(s.token_ref)
+            deduped_snaps.append(s)
+        jwt_by_user, sas_by_token = await _build_metric_lookups(db)
         payload["snapshots"] = [
-            {
-                "id": str(s.id),
-                "token_type": s.token_type,
-                "token_ref": s.token_ref,
-                "user_id": s.user_id,
-                "rule_score": s.rule_score,
-                "ai_score_pct": s.ai_score_pct,
-                "ai_level": s.ai_level,
-                "decision": s.decision,
-                "source": s.source,
-                "created_at": s.created_at.isoformat() if s.created_at else None,
-            }
-            for s in snaps
+            _serialize_snapshot(
+                s,
+                jwt_by_user.get(str(s.user_id)) if s.token_type == "jwt" else sas_by_token.get(str(s.token_ref)),
+            )
+            for s in deduped_snaps
         ]
     return payload
 

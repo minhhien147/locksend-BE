@@ -24,6 +24,8 @@ const REC_BADGE: Record<string, string> = {
     "bg-slate-900 text-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400",
   MONITOR:
     "bg-slate-900 text-amber-200 dark:bg-amber-500/10 dark:text-amber-400",
+  REVIEW:
+    "bg-slate-900 text-rose-200 dark:bg-rose-500/10 dark:text-rose-400",
   REVOKE:
     "bg-slate-900 text-rose-200 dark:bg-rose-500/10 dark:text-rose-400",
 };
@@ -156,15 +158,33 @@ interface RuleAiAgreement {
 interface AiTokenResult {
   token_id?: string;
   token_type?: string;
+  subject_label?: string;
+  email?: string | null;
+  blob_name?: string | null;
+  role?: string | null;
+  file_id?: string | null;
   risk_score_pct: number;
   risk_score_raw: number;
   risk_level: string;
   ai_level_raw: string;
   decision: string;
+  ai_decision?: string;
   is_attack: boolean;
   rule_score?: number;
   rule_level?: string;
   rule_recommendation?: string;
+  rule_reasons?: string[];
+  active_sessions?: number;
+  access_count?: number;
+  ip_count?: number;
+  accesses_per_hour?: number;
+  downloads_per_hour?: number;
+  token_age_hours?: number;
+  is_revoked?: boolean;
+  is_expired?: boolean;
+  source?: string;
+  requires_admin_action?: boolean;
+  overridden_by_rule?: boolean;
   behavior_badges?: BehaviorBadgeData[];
   summary_vi?: string;
   agreement?: RuleAiAgreement;
@@ -192,6 +212,7 @@ interface AiAnalysisJob {
   result_summary?: {
     total_requested: number;
     skipped_recent: number;
+    skipped_benign?: number;
     skipped_cache: number;
     ai_analyzed: number;
     failed: number;
@@ -202,18 +223,36 @@ interface AiAnalysisJob {
   created_at?: string | null;
   started_at?: string | null;
   completed_at?: string | null;
-  snapshots?: Array<{
-    id: string;
-    token_type: string;
-    token_ref: string;
-    user_id?: string | null;
-    rule_score: number;
-    ai_score_pct: number;
-    ai_level: string;
-    decision: string;
-    source: string;
-    created_at: string;
-  }>;
+  snapshots?: AiSnapshotRow[];
+}
+
+interface AiSnapshotRow {
+  id: string;
+  token_type: string;
+  token_ref: string;
+  user_id?: string | null;
+  subject_label?: string;
+  email?: string | null;
+  blob_name?: string | null;
+  role?: string | null;
+  file_id?: string | null;
+  rule_score: number;
+  rule_level?: string;
+  rule_recommendation?: string;
+  rule_reasons?: string[];
+  ai_score_pct: number;
+  ai_level: string;
+  decision: string;
+  active_sessions?: number;
+  access_count?: number;
+  ip_count?: number;
+  accesses_per_hour?: number;
+  downloads_per_hour?: number;
+  token_age_hours?: number;
+  is_revoked?: boolean;
+  is_expired?: boolean;
+  source: string;
+  created_at: string;
 }
 
 type Tab = "overview" | "tokens" | "ai-report" | "trends" | "files";
@@ -384,6 +423,10 @@ export default function AdminTokenSecurityPage() {
   const [aiRuleMetrics, setAiRuleMetrics] = useState<TokenMetric[]>([]);
   const [aiError, setAiError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [savedReports, setSavedReports] = useState<AiAnalysisJob[]>([]);
+  const [savedReportsLoading, setSavedReportsLoading] = useState(false);
+  const [selectedReportJobId, setSelectedReportJobId] = useState<string | null>(null);
+  const [selectedReportMeta, setSelectedReportMeta] = useState<AiAnalysisJob | null>(null);
 
   const [_activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<AiAnalysisJob | null>(null);
@@ -469,38 +512,115 @@ export default function AdminTokenSecurityPage() {
     }
   }, []);
 
-  const loadRecentSnapshots = useCallback(async () => {
-    try {
-      const res = await api.get<{ snapshots: any[] }>("/auth/admin/token-security/ai/snapshots");
-      const snap = res.data.snapshots ?? [];
-      setAiResults(
-        snap.map((s) => ({
-          token_id: s.token_ref,
-          token_type: s.token_type as any,
-          risk_score_pct: s.ai_score_pct,
-          risk_score_raw: s.ai_score_pct / 100,
-          risk_level: s.ai_level,
-          ai_level_raw: s.ai_level,
-          decision: s.decision,
-          is_attack: s.ai_score_pct >= 50,
-          rule_score: s.rule_score,
-          rule_level: "low",
-          rule_recommendation: "ALLOW",
-          behavior_badges: [],
-          agreement: undefined,
-          explanation: { summary: "", top_features: [], summary_vi: s.source },
-        }))
-      );
-    } catch {
-      // ignore
-    }
+  const mapSnapshotToAiResult = (s: AiSnapshotRow): AiTokenResult => ({
+    token_id: s.token_ref,
+    token_type: s.token_type as "jwt" | "sas",
+    subject_label: s.subject_label,
+    email: s.email,
+    blob_name: s.blob_name,
+    role: s.role,
+    file_id: s.file_id,
+    risk_score_pct: s.ai_score_pct,
+    risk_score_raw: s.ai_score_pct / 100,
+    risk_level: s.ai_level,
+    ai_level_raw: s.ai_level,
+    decision: s.decision,
+    ai_decision: undefined,
+    is_attack: s.ai_score_pct >= 50,
+    rule_score: s.rule_score,
+    rule_level: s.rule_level,
+    rule_recommendation: s.rule_recommendation,
+    rule_reasons: s.rule_reasons,
+    active_sessions: s.active_sessions,
+    access_count: s.access_count,
+    ip_count: s.ip_count,
+    accesses_per_hour: s.accesses_per_hour,
+    downloads_per_hour: s.downloads_per_hour,
+    token_age_hours: s.token_age_hours,
+    is_revoked: s.is_revoked,
+    is_expired: s.is_expired,
+    source: s.source,
+    requires_admin_action: s.decision === "REVIEW",
+    overridden_by_rule: s.decision === "REVIEW" && s.rule_recommendation === "REVOKE",
+    behavior_badges: [],
+    agreement: undefined,
+    explanation: { summary: "", top_features: [], summary_vi: s.source },
+  });
+
+  const upsertSavedReport = useCallback((job: AiAnalysisJob) => {
+    setSavedReports((prev) => {
+      const merged = [job, ...prev.filter((item) => item.job_id !== job.job_id)];
+      merged.sort((a, b) => {
+        const ta = new Date(a.created_at ?? 0).getTime();
+        const tb = new Date(b.created_at ?? 0).getTime();
+        return tb - ta;
+      });
+      return merged;
+    });
   }, []);
+
+  const applySavedReport = useCallback((job: AiAnalysisJob) => {
+    const snapshots = job.snapshots ?? [];
+    setSelectedReportJobId(job.job_id);
+    setSelectedReportMeta(job);
+    setAiRuleMetrics([]);
+    setAiResults(snapshots.map(mapSnapshotToAiResult));
+    setAiError(null);
+  }, []);
+
+  const loadSavedReport = useCallback(async (jobId: string) => {
+    try {
+      const res = await api.get<AiAnalysisJob>(
+        `/auth/admin/token-security/ai/jobs/${jobId}`,
+        { params: { include_details: true, snapshots_limit: 500 } }
+      );
+      applySavedReport(res.data);
+    } catch {
+      setAiError("Không tải được report đã lưu.");
+    }
+  }, [applySavedReport]);
+
+  const loadSavedReports = useCallback(async (preferredJobId?: string | null) => {
+    setSavedReportsLoading(true);
+    try {
+      const res = await api.get<{ jobs: AiAnalysisJob[] }>("/auth/admin/token-security/ai/jobs?limit=20");
+      const completedJobs = (res.data.jobs ?? []).filter((job) => job.status === "completed");
+      setSavedReports(completedJobs);
+
+      const preferredJob = preferredJobId
+        ? completedJobs.find((job) => job.job_id === preferredJobId)
+        : null;
+
+      if (preferredJobId) {
+        if (preferredJob) {
+          void loadSavedReport(preferredJob.job_id);
+        }
+        return;
+      }
+
+      const jobToOpen =
+        (selectedReportJobId && completedJobs.find((job) => job.job_id === selectedReportJobId)) ??
+        completedJobs[0];
+
+      if (jobToOpen) {
+        void loadSavedReport(jobToOpen.job_id);
+      } else {
+        setSelectedReportJobId(null);
+        setSelectedReportMeta(null);
+        setAiResults([]);
+      }
+    } catch {
+      setAiError("Không tải được danh sách report đã lưu.");
+    } finally {
+      setSavedReportsLoading(false);
+    }
+  }, [loadSavedReport, selectedReportJobId]);
 
   useEffect(() => {
     if (activeTab === "ai-report") {
-      void loadRecentSnapshots();
+      void loadSavedReports();
     }
-  }, [activeTab, loadRecentSnapshots]);
+  }, [activeTab, loadSavedReports]);
 
   useEffect(() => {
     if (aiHealth?.realtime_enabled === false) return;
@@ -660,11 +780,12 @@ export default function AdminTokenSecurityPage() {
     URL.revokeObjectURL(url);
   };
 
-  const runAiAnalyze = async (forceAll: boolean = true) => {
+  const runAiAnalyze = async (forceAll: boolean = false) => {
     setAnalyzing(true);
     setAiResults([]);
     setAiRuleMetrics([]);
     setAiError(null);
+    setSelectedReportMeta(null);
     setActiveJob(null);
     try {
       const res = await api.post<{
@@ -678,7 +799,23 @@ export default function AdminTokenSecurityPage() {
         skip_recent: !forceAll,
         force_all: forceAll,
       });
-      const { job_id } = res.data;
+        const { job_id, total_tokens, status } = res.data;
+        const queuedJob: AiAnalysisJob = {
+          job_id,
+          token_type: "all",
+          total_tokens,
+          analyzed_count: 0,
+          skipped_cached: 0,
+          failed_count: 0,
+          status,
+          progress_pct: 0,
+          result_summary: null,
+          created_at: new Date().toISOString(),
+          snapshots: [],
+        };
+        setSelectedReportJobId(job_id);
+        setSelectedReportMeta(queuedJob);
+        upsertSavedReport(queuedJob);
       setActiveJobId(job_id);
       flash("ok", t("admin.tokenSecurity.jobStarted") ?? `Job ${job_id.slice(0, 8)} started…`);
       void pollJob(job_id);
@@ -699,14 +836,16 @@ export default function AdminTokenSecurityPage() {
         const job = res.data;
         setActiveJob(job);
         if (job.status === "completed") {
-          void loadRecentSnapshots();
+            upsertSavedReport(job);
+          applySavedReport(job);
+          void loadSavedReports(jobId);
           setActiveTab("ai-report");
           const summary = job.result_summary;
           const countOk = summary?.ai_analyzed ?? job.analyzed_count;
-          const skipped = summary?.skipped_recent ?? job.skipped_cached;
+          const skipped = summary?.skipped_benign ?? summary?.skipped_recent ?? job.skipped_cached;
           
           if (skipped > 0) {
-            flash("ok", `Analyzed ${countOk} tokens. Skipped ${skipped} cached tokens.`);
+              flash("ok", `Analyzed ${countOk} tokens. Skipped ${skipped} previously-benign tokens.`);
           } else {
             flash("ok", t("admin.tokenSecurity.aiAnalyzed", { count: countOk }) ?? `Analyzed ${countOk} tokens successfully.`);
           }
@@ -734,7 +873,7 @@ export default function AdminTokenSecurityPage() {
         setActiveJobId(null);
       }
     },
-    [t]
+    [applySavedReport, loadSavedReports, t, upsertSavedReport]
   );
 
   useEffect(() => {
@@ -813,6 +952,10 @@ export default function AdminTokenSecurityPage() {
 
   const topRisk = overview?.top_risk_tokens ?? [];
   const aiReady = aiHealth?.ready === true;
+  const visibleSavedReports =
+    selectedReportMeta && !savedReports.some((job) => job.job_id === selectedReportMeta.job_id)
+      ? [selectedReportMeta, ...savedReports]
+      : savedReports;
 
   return (
     <div className="space-y-5">
@@ -1631,7 +1774,7 @@ export default function AdminTokenSecurityPage() {
         <div className="space-y-4">
 
           {/* Empty state */}
-          {!aiResults.length && !aiError && (
+          {!aiResults.length && !aiError && !savedReportsLoading && savedReports.length === 0 && (
             <div className={`${surfaceCard} p-8 text-center`}>
               <p className="text-slate-600 dark:text-white/35 text-sm mb-4">
                 {t("admin.tokenSecurity.noAiReport")}
@@ -1658,6 +1801,31 @@ export default function AdminTokenSecurityPage() {
             </div>
           )}
 
+          {!aiResults.length && !aiError && selectedReportMeta && (
+            <div className={`${surfaceCard} p-5`}>
+              <div className="flex flex-wrap items-center gap-3 mb-3">
+                <h3 className="text-sm font-semibold text-emerald-300">
+                  Report {selectedReportMeta.job_id.slice(0, 8)}
+                </h3>
+                {selectedReportMeta.created_at && (
+                  <span className="text-xs text-slate-500 dark:text-white/30">
+                    Saved at {new Date(selectedReportMeta.created_at).toLocaleString("vi-VN")}
+                  </span>
+                )}
+              </div>
+              <p className="text-sm text-slate-300">
+                Lần phân tích này không tạo snapshot AI mới.
+              </p>
+              <p className="mt-2 text-xs text-slate-500 dark:text-white/35">
+                Analyzed: {selectedReportMeta.result_summary?.ai_analyzed ?? selectedReportMeta.analyzed_count}
+                <span className="mx-2">·</span>
+                Skipped: {selectedReportMeta.result_summary?.skipped_benign ?? selectedReportMeta.result_summary?.skipped_recent ?? selectedReportMeta.skipped_cached}
+                <span className="mx-2">·</span>
+                Saved snapshots: {selectedReportMeta.result_summary?.saved_snapshots ?? 0}
+              </p>
+            </div>
+          )}
+
           {/* Results */}
           {aiResults.length > 0 && (
             <>
@@ -1666,6 +1834,11 @@ export default function AdminTokenSecurityPage() {
                 <div className="flex flex-wrap items-center gap-3 mb-3">
                   <h3 className="text-sm font-semibold text-emerald-300">{t("admin.tokenSecurity.aiResults")}</h3>
                   <span className="text-xs text-slate-500 dark:text-white/30">{t("admin.tokenSecurity.tokensAnalyzed", { count: aiResults.length })}</span>
+                  {selectedReportMeta?.created_at && (
+                    <span className="text-xs text-slate-500 dark:text-white/30">
+                      Saved at {new Date(selectedReportMeta.created_at).toLocaleString("vi-VN")}
+                    </span>
+                  )}
                   <button
                     type="button"
                     onClick={exportAiCsv}
@@ -1677,7 +1850,7 @@ export default function AdminTokenSecurityPage() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-center">
                   {[
                     { label: t("admin.tokenSecurity.monitor"), value: aiResults.filter(r => r.decision === "MONITOR").length, color: "text-amber-300" },
-                    { label: t("admin.tokenSecurity.revoke"), value: aiResults.filter(r => r.decision === "REVOKE").length, color: "text-rose-300" },
+                      { label: "Needs Review", value: aiResults.filter(r => r.decision === "REVIEW" || r.decision === "REVOKE").length, color: "text-rose-300" },
                     { label: t("admin.tokenSecurity.ruleDisagree"), value: aiResults.filter(r => r.agreement?.status === "disagree").length, color: "text-orange-300" },
                   ].map(({ label, value, color }) => (
                     <div key={label}>
@@ -1703,12 +1876,13 @@ export default function AdminTokenSecurityPage() {
                     );
                     const ruleScore = r.rule_score ?? rule?.risk_score ?? "—";
                     const showDisagree = r.agreement?.status === "disagree";
+                      const primaryLabel = r.subject_label ?? rule?.email ?? r.email ?? r.blob_name ?? r.token_id?.slice(0, 20) ?? "—";
                     return (
                       <details key={r.token_id ?? i} className="group px-5 py-3.5">
                         <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
                           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
                             <span className="text-xs text-slate-800 dark:text-white/75 truncate max-w-[200px] sm:max-w-xs">
-                              {rule?.email ?? r.token_id?.slice(0, 20) ?? "—"}
+                                {primaryLabel}
                             </span>
                             <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
                               r.token_type === "jwt" ? "bg-indigo-500/15 text-indigo-300" : "bg-sky-500/15 text-sky-300"
@@ -1724,6 +1898,12 @@ export default function AdminTokenSecurityPage() {
                               {t("admin.tokenSecurity.details")}
                             </span>
                           </div>
+                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500 dark:text-white/35">
+                              {r.email && <span>Email: {r.email}</span>}
+                              {r.blob_name && <span>Blob: {r.blob_name}</span>}
+                              {r.file_id && <span>File: {r.file_id.slice(0, 8)}…</span>}
+                              {r.token_id && <span>Ref: {r.token_id.slice(0, 16)}…</span>}
+                            </div>
                           {(r.behavior_badges?.length ?? 0) > 0 && (
                             <div className="flex flex-wrap gap-1.5 mt-2">
                               {r.behavior_badges!.slice(0, 2).map((b) => (
@@ -1733,7 +1913,73 @@ export default function AdminTokenSecurityPage() {
                           )}
                         </summary>
                         <div className="mt-2 pt-2 border-t border-white/[0.04] space-y-2 text-[11px] text-slate-500 dark:text-white/40">
-                          <p>{r.summary_vi ?? r.explanation?.summary_vi}</p>
+                            <p>{r.summary_vi ?? r.explanation?.summary_vi}</p>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+                              <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                <p className="text-slate-400">Admin action</p>
+                                <p className="font-semibold text-white/80">{r.decision}</p>
+                              </div>
+                              <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                <p className="text-slate-400">Rule rec</p>
+                                <p className="font-semibold text-white/80">{r.rule_recommendation ?? "—"}</p>
+                              </div>
+                              <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                <p className="text-slate-400">IPs</p>
+                                <p className="font-semibold text-white/80">{r.ip_count ?? "—"}</p>
+                              </div>
+                              <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                <p className="text-slate-400">Age (h)</p>
+                                <p className="font-semibold text-white/80">{r.token_age_hours ?? "—"}</p>
+                              </div>
+                              {r.token_type === "jwt" ? (
+                                <>
+                                  <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                    <p className="text-slate-400">Sessions</p>
+                                    <p className="font-semibold text-white/80">{r.active_sessions ?? "—"}</p>
+                                  </div>
+                                  <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                    <p className="text-slate-400">Access/hr</p>
+                                    <p className="font-semibold text-white/80">{r.accesses_per_hour ?? "—"}</p>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                    <p className="text-slate-400">Access total</p>
+                                    <p className="font-semibold text-white/80">{r.access_count ?? "—"}</p>
+                                  </div>
+                                  <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                    <p className="text-slate-400">Download/hr</p>
+                                    <p className="font-semibold text-white/80">{r.downloads_per_hour ?? "—"}</p>
+                                  </div>
+                                </>
+                              )}
+                              <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                <p className="text-slate-400">Expired</p>
+                                <p className="font-semibold text-white/80">{r.is_expired ? "Yes" : "No"}</p>
+                              </div>
+                              <div className="rounded-lg bg-white/[0.03] px-2.5 py-2">
+                                <p className="text-slate-400">Revoked</p>
+                                <p className="font-semibold text-white/80">{r.is_revoked ? "Yes" : "No"}</p>
+                              </div>
+                            </div>
+                            {r.requires_admin_action && (
+                              <div className="rounded-lg border border-rose-500/20 bg-rose-500/8 px-3 py-2 text-[11px] text-rose-200">
+                                Case này cần admin quyết định cuối cùng. Hệ thống chỉ gợi ý review, không tự revoke theo AI report.
+                              </div>
+                            )}
+                            {(r.rule_reasons?.length ?? 0) > 0 && (
+                              <div>
+                                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Rule signals</p>
+                                <ul className="space-y-1">
+                                  {r.rule_reasons!.map((reason, idx) => (
+                                    <li key={`${r.token_id}-${idx}`} className="text-[11px] text-slate-300">
+                                      - {reason}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
                           {r.explanation?.top_features?.length > 0 && (
                             <div className="flex flex-wrap gap-1.5">
                               {r.explanation.top_features.slice(0, 3).map((f, fi) => (
@@ -1753,6 +1999,78 @@ export default function AdminTokenSecurityPage() {
               </div>
             </>
           )}
+
+          <div className={`${surfaceCard} p-5`}>
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-100 dark:text-white/85">Saved reports</h3>
+                <p className="text-xs text-slate-500 dark:text-white/30">
+                  Mỗi lần Analyze được lưu thành một report riêng theo job.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadSavedReports(selectedReportJobId)}
+                className="ml-auto text-xs px-3 py-1.5 rounded-lg border border-white/10 text-slate-400 hover:text-white hover:bg-white/5 transition"
+              >
+                Refresh reports
+              </button>
+            </div>
+
+            {savedReportsLoading ? (
+              <div className="flex items-center gap-2 text-sm text-slate-400">
+                <LoadingSpinner size="sm" />
+                <span>Đang tải danh sách report…</span>
+              </div>
+            ) : visibleSavedReports.length === 0 ? (
+              <p className="text-sm text-slate-500 dark:text-white/30">
+                Chưa có report đã lưu. Chạy Analyze để tạo report đầu tiên.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {visibleSavedReports.map((job) => {
+                  const isActive = job.job_id === selectedReportJobId;
+                  const createdAt = job.created_at
+                    ? new Date(job.created_at).toLocaleString("vi-VN")
+                    : "Unknown time";
+                  const analyzed = job.result_summary?.ai_analyzed ?? job.analyzed_count;
+                  const skipped = job.result_summary?.skipped_benign ?? job.result_summary?.skipped_recent ?? job.skipped_cached;
+                  return (
+                    <button
+                      key={job.job_id}
+                      type="button"
+                      onClick={() => void loadSavedReport(job.job_id)}
+                      className={`w-full rounded-xl border px-4 py-3 text-left transition ${
+                        isActive
+                          ? "border-emerald-500/30 bg-emerald-500/10"
+                          : "border-white/10 bg-slate-950/40 hover:bg-white/[0.04]"
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium text-white/85">Report {job.job_id.slice(0, 8)}</span>
+                        <span className="text-[11px] text-slate-500">{createdAt}</span>
+                        {job.status !== "completed" && (
+                          <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300">
+                            {job.status}
+                          </span>
+                        )}
+                        <span className="ml-auto text-[11px] text-slate-400">
+                          {analyzed} analyzed · {skipped} skipped
+                        </span>
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500 dark:text-white/35">
+                        Saved snapshots: {job.result_summary?.saved_snapshots ?? 0}
+                        <span className="mx-2">·</span>
+                        High risk: {job.result_summary?.high_risk_count ?? 0}
+                        <span className="mx-2">·</span>
+                        Revoke: {job.result_summary?.revoke_recommendations ?? 0}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

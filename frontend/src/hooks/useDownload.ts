@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   decryptFile,
   decryptFileChunked,
@@ -23,6 +23,8 @@ import {
 } from "../utils/api";
 import { saveDownloadEntry } from "../utils/downloadHistory";
 import { useT } from "../i18n/context";
+import { useTransferTimer } from "./useTransferTimer";
+import { computeTransferStats, type TransferStats } from "../utils/transferStats";
 
 export type DownloadStage =
   | "idle"
@@ -44,9 +46,12 @@ interface UseDownloadState {
   isChunkedFile: boolean;
   verifiedMeta: EncryptionMetadata | null;
   plaintextChecksum: string;
+  bytesTransferred: number;
+  bytesTotal: number;
 }
 
 export interface UseDownloadReturn extends UseDownloadState {
+  transferStats: TransferStats | null;
   downloadAndDecrypt: (
     sasUrl: string,
     fallbackMetadata?: Record<string, unknown>
@@ -55,6 +60,7 @@ export interface UseDownloadReturn extends UseDownloadState {
     fileId: string,
     encryptionMetadata: Record<string, unknown>
   ) => Promise<void>;
+  cancel: () => void;
   reset: () => void;
 }
 
@@ -66,6 +72,8 @@ const initialState: UseDownloadState = {
   isChunkedFile: false,
   verifiedMeta: null,
   plaintextChecksum: "",
+  bytesTransferred: 0,
+  bytesTotal: 0,
 };
 
 function mergeMetadata(
@@ -78,6 +86,33 @@ function mergeMetadata(
 export function useDownload(): UseDownloadReturn {
   const t = useT();
   const [state, setState] = useState<UseDownloadState>(initialState);
+  const abortRef = useRef<AbortController | null>(null);
+  const transferActive =
+    state.stage === "downloading" || state.stage === "decrypting";
+  const { startedAt, tick } = useTransferTimer(transferActive);
+  const transferStats = computeTransferStats(
+    state.bytesTransferred,
+    state.bytesTotal,
+    startedAt,
+    tick
+  );
+
+  function isAbortError(err: unknown): boolean {
+    const anyErr = err as { name?: string; code?: string; message?: string };
+    if (abortRef.current?.signal.aborted) return true;
+    if (anyErr?.code === "ERR_CANCELED") return true;
+    if (anyErr?.name === "CanceledError") return true;
+    if (typeof anyErr?.message === "string" && anyErr.message.toLowerCase().includes("canceled")) {
+      return true;
+    }
+    return false;
+  }
+
+  function cancel() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setState(initialState);
+  }
 
   async function finishDownload(
     metadata: EncryptionMetadata,
@@ -104,13 +139,16 @@ export function useDownload(): UseDownloadReturn {
         isChunkedFile: isChunked,
         verifiedMeta: metadata,
         plaintextChecksum: metadata.plaintextChecksum ?? "",
+        bytesTransferred: fileSizeBytes,
+        bytesTotal: fileSizeBytes,
       });
   }
 
   async function runStreamingDecrypt(
     fileId: string,
     metadata: ChunkedEncryptionMetadata,
-    logSasUrl: string
+    logSasUrl: string,
+    signal: AbortSignal
   ): Promise<void> {
     const myKeys = getKeys();
     if (!myKeys) {
@@ -138,10 +176,13 @@ export function useDownload(): UseDownloadReturn {
       isChunkedFile: true,
       verifiedMeta: null,
       plaintextChecksum: "",
+      bytesTransferred: 0,
+      bytesTotal: metadata.fileSize,
     });
 
     let writable: FileSystemWritableFileStream | null = null;
     try {
+      if (signal.aborted) throw new Error("CANCELLED");
       writable = await pickSaveFile(metadata.fileName);
       const fileSizeBytes = await decryptChunkedToWritable(
         metadata,
@@ -150,19 +191,28 @@ export function useDownload(): UseDownloadReturn {
           downloadCiphertextChunk(
             fileId,
             chunkIndex,
-            logSasUrl.startsWith("https://") ? logSasUrl : undefined
+            logSasUrl.startsWith("https://") ? logSasUrl : undefined,
+            signal
           ),
         writable,
         (done, total) =>
           setState((prev) => ({
             ...prev,
             chunkProgress: { done, total },
+            bytesTransferred: Math.min(
+              metadata.fileSize,
+              done * metadata.chunkSize
+            ),
           }))
       );
       await closeSaveFile(writable);
       writable = null;
       await finishDownload(metadata, fileSizeBytes, logSasUrl, fileId);
     } catch (e) {
+      if (isAbortError(e) || (e as Error)?.message === "CANCELLED") {
+        cancel();
+        throw new Error("CANCELLED");
+      }
       if (writable) {
         try {
           await writable.abort();
@@ -185,7 +235,8 @@ export function useDownload(): UseDownloadReturn {
       metadata: EncryptionMetadata;
       serverFileId?: string;
     }>,
-    logSasUrl: string
+    logSasUrl: string,
+    signal: AbortSignal
   ): Promise<void> {
     const myKeys = getKeys();
     if (!myKeys) {
@@ -204,14 +255,21 @@ export function useDownload(): UseDownloadReturn {
       isChunkedFile: false,
       verifiedMeta: null,
       plaintextChecksum: "",
+      bytesTransferred: 0,
+      bytesTotal: 0,
     });
 
     try {
+      if (signal.aborted) throw new Error("CANCELLED");
       const { ciphertext, metadata, serverFileId } = await load();
+      if (signal.aborted) throw new Error("CANCELLED");
 
       setState((prev) => ({
         ...prev,
         stage: "decrypting",
+        fileName: metadata.fileName,
+        bytesTotal: metadata.fileSize,
+        bytesTransferred: prev.bytesTransferred || ciphertext.byteLength,
       }));
 
       let plaintext: Uint8Array;
@@ -232,6 +290,10 @@ export function useDownload(): UseDownloadReturn {
             setState((prev) => ({
               ...prev,
               chunkProgress: { done, total },
+              bytesTransferred: Math.min(
+                chunkedMeta.fileSize,
+                Math.round((done / total) * chunkedMeta.fileSize)
+              ),
             }))
         );
       } else {
@@ -241,6 +303,7 @@ export function useDownload(): UseDownloadReturn {
           myKeys.x25519.privateKey
         );
       }
+      if (signal.aborted) throw new Error("CANCELLED");
 
       downloadBlob(plaintext, metadata.fileName, metadata.mimeType);
       await finishDownload(
@@ -250,6 +313,10 @@ export function useDownload(): UseDownloadReturn {
         serverFileId
       );
     } catch (e) {
+      if (isAbortError(e) || (e as Error)?.message === "CANCELLED") {
+        cancel();
+        throw new Error("CANCELLED");
+      }
       setState((prev) => ({
         ...prev,
         error: (e as Error)?.message ?? t("common.unknownError"),
@@ -272,6 +339,9 @@ export function useDownload(): UseDownloadReturn {
     }
 
     const trimmed = sasUrl.trim();
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
     try {
       const info = await resolveCiphertextInfoBySas(trimmed);
       const metadata = mergeMetadata(info.metadata, fallbackMetadata);
@@ -279,7 +349,8 @@ export function useDownload(): UseDownloadReturn {
         await runStreamingDecrypt(
           info.file_id,
           metadata as ChunkedEncryptionMetadata,
-          trimmed
+          trimmed,
+          signal
         );
         return;
       }
@@ -288,8 +359,20 @@ export function useDownload(): UseDownloadReturn {
     }
 
     await runDecryptPipeline(
-      () => downloadCiphertext(trimmed, fallbackMetadata),
-      trimmed
+      () =>
+        downloadCiphertext(
+          trimmed,
+          fallbackMetadata,
+          (loaded, total) =>
+            setState((prev) => ({
+              ...prev,
+              bytesTransferred: loaded,
+              bytesTotal: total ?? prev.bytesTotal,
+            })),
+          signal
+        ),
+      trimmed,
+      signal
     );
   }
 
@@ -297,30 +380,50 @@ export function useDownload(): UseDownloadReturn {
     fileId: string,
     encryptionMetadata: Record<string, unknown>
   ): Promise<void> {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
     const metadata = encryptionMetadata as unknown as EncryptionMetadata;
     if (shouldStreamDecrypt(metadata)) {
       await runStreamingDecrypt(
         fileId,
         metadata as ChunkedEncryptionMetadata,
-        `vault://${fileId}`
+        `vault://${fileId}`,
+        signal
       );
       return;
     }
 
     await runDecryptPipeline(
-      () => downloadVaultCiphertext(fileId, encryptionMetadata),
-      `vault://${fileId}`
+      () =>
+        downloadVaultCiphertext(
+          fileId,
+          encryptionMetadata,
+          (loaded, total) =>
+            setState((prev) => ({
+              ...prev,
+              bytesTransferred: loaded,
+              bytesTotal: total ?? prev.bytesTotal,
+            })),
+          signal
+        ),
+      `vault://${fileId}`,
+      signal
     );
   }
 
   function reset() {
+    abortRef.current?.abort();
+    abortRef.current = null;
     setState(initialState);
   }
 
   return {
     ...state,
+    transferStats,
     downloadAndDecrypt,
     downloadVaultFile,
+    cancel,
     reset,
   };
 }
