@@ -18,6 +18,7 @@ import audit
 from auth import CurrentUser, JWT_ALGORITHM, _signing_key
 from db.models import RefreshToken, User
 from services import email_verification
+from services.vault_storage import get_effective_quota_bytes_for_user, normalize_storage_plan
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -142,6 +143,9 @@ def to_user_out(u: User, has_public_key: bool = False) -> "UserOut":
         email=u.email,
         display_name=u.display_name,
         role=u.role,
+        storage_plan=normalize_storage_plan(u.storage_plan),
+        vault_quota_bytes=u.vault_quota_bytes,
+        effective_vault_quota_bytes=get_effective_quota_bytes_for_user(u),
         created_at=u.created_at.isoformat(),
         has_public_key=has_public_key,
     )
@@ -196,6 +200,11 @@ class ChangeRoleRequest(BaseModel):
     role: RoleType
 
 
+class ChangeStoragePlanRequest(BaseModel):
+    storage_plan: Literal["free", "pro"]
+    vault_quota_gb: int | None = Field(default=None, ge=1, le=1024)
+
+
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
@@ -214,6 +223,9 @@ class UserOut(BaseModel):
     email: str | None
     display_name: str | None
     role: str
+    storage_plan: Literal["free", "pro"] = "free"
+    vault_quota_bytes: int | None = None
+    effective_vault_quota_bytes: int
     created_at: str
     has_public_key: bool = False
 

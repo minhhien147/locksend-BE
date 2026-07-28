@@ -15,6 +15,7 @@ from db.models import File, FileRecipient, User, UserDisplayNameHistory, UserPub
 from services.azure_storage import delete_blob
 
 from routers._auth_helpers import (
+    ChangeStoragePlanRequest,
     ChangeRoleRequest,
     DisplayNameHistoryOut,
     PublicKeyOut,
@@ -26,6 +27,7 @@ from routers._auth_helpers import (
     require_admin,
     to_user_out,
 )
+from services.vault_storage import normalize_storage_plan
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +230,45 @@ async def change_user_role(
         target_user_id=user_id,
         old_role=old_role,
         new_role=body.role,
+        request_id=audit.get_request_id(request),
+    )
+    return to_user_out(user)
+
+
+@router.patch("/admin/users/{user_id}/storage-plan", response_model=UserOut, tags=["admin"])
+async def change_user_storage_plan(
+    user_id: str,
+    body: ChangeStoragePlanRequest,
+    request: Request,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Đổi gói dung lượng vault của user — free/pro hoặc override quota riêng."""
+    require_admin(current)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User không tồn tại")
+
+    old_plan = normalize_storage_plan(user.storage_plan)
+    old_quota = user.vault_quota_bytes
+
+    user.storage_plan = normalize_storage_plan(body.storage_plan)
+    user.vault_quota_bytes = (
+        int(body.vault_quota_gb) * 1024**3 if body.vault_quota_gb is not None else None
+    )
+    await db.commit()
+    await db.refresh(user)
+
+    audit.log_event(
+        "admin.change_storage_plan",
+        user_id=current.id,
+        role=current.role,
+        target_user_id=user_id,
+        old_plan=old_plan,
+        new_plan=user.storage_plan,
+        old_quota_bytes=old_quota,
+        new_quota_bytes=user.vault_quota_bytes,
         request_id=audit.get_request_id(request),
     )
     return to_user_out(user)

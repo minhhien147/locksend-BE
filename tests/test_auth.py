@@ -272,6 +272,28 @@ class TestRBAC:
         assert resp.status_code == 200
         assert resp.json()["role"] == "recipient"
 
+    async def test_admin_can_upgrade_user_to_pro_storage(
+        self, client: AsyncClient, db_session: AsyncSession
+    ):
+        await _make_user(db_session, "planadmin@test.com", role="admin")
+        target = await _make_user(db_session, "protarget@test.com", role="owner")
+        admin_token = await _login(client, "planadmin@test.com")
+        target_token = await _login(client, "protarget@test.com")
+
+        resp = await client.patch(
+            f"/auth/admin/users/{target.id}/storage-plan",
+            json={"storage_plan": "pro"},
+            headers=_auth(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["storage_plan"] == "pro"
+        assert data["effective_vault_quota_bytes"] == 50 * 1024**3
+
+        quota = await client.get("/vault/quota", headers=_auth(target_token))
+        assert quota.status_code == 200
+        assert quota.json()["quota_bytes"] == 50 * 1024**3
+
     async def test_admin_cannot_change_own_role(
         self, client: AsyncClient, db_session: AsyncSession
     ):

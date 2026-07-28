@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT UNIQUE,
     display_name TEXT,
     role TEXT NOT NULL DEFAULT 'owner',
+    storage_plan TEXT NOT NULL DEFAULT 'free',
+    vault_quota_bytes BIGINT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

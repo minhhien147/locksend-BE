@@ -27,8 +27,8 @@ from schemas.files import (
 )
 from services.azure_storage import CONTAINER_NAME, delete_blob, get_blob_service_client
 from services.vault_storage import (
-    STORAGE_QUOTA_BYTES,
     assert_vault_quota,
+    get_owner_quota_bytes,
     get_owner_usage_bytes,
     resolve_folder,
 )
@@ -52,6 +52,7 @@ async def vault_quota(
     db: AsyncSession = Depends(get_db),
 ):
     used = await get_owner_usage_bytes(db, current.id)
+    quota_bytes = await get_owner_quota_bytes(db, current.id)
     count = (
         await db.execute(
             select(func.count())
@@ -64,7 +65,7 @@ async def vault_quota(
     ).scalar_one()
     return VaultQuotaOut(
         used_bytes=used,
-        quota_bytes=STORAGE_QUOTA_BYTES,
+        quota_bytes=quota_bytes,
         file_count=int(count or 0),
     )
 

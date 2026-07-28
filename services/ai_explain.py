@@ -18,6 +18,7 @@ _BEHAVIOR_PATTERNS: tuple[tuple[tuple[str, ...], str, str, str], ...] = (
 _DECISION_VI = {
     "ALLOW": "cho phép",
     "MONITOR": "theo dõi",
+    "REVIEW": "chờ admin xem xét",
     "REVOKE": "thu hồi token",
 }
 
@@ -30,6 +31,13 @@ _LEVEL_VI = {
     "LOW": "thấp",
     "HIGH": "cao",
     "CRITICAL": "nghiêm trọng",
+}
+
+_DECISION_ORDER = {
+    "ALLOW": 0,
+    "MONITOR": 1,
+    "REVIEW": 2,
+    "REVOKE": 3,
 }
 
 
@@ -91,6 +99,36 @@ def rule_ai_agreement(rule_level: str | None, ai_level: str | None) -> dict[str,
     }
 
 
+def compose_final_decision(
+    ai_decision: str | None,
+    rule_recommendation: str | None,
+) -> dict[str, Any]:
+    """
+    Quyết định cuối cho UI/admin.
+    - AI chỉ đưa ra khuyến nghị.
+    - Nếu AI hoặc rule engine muốn REVOKE, quyết định cuối phải là REVIEW
+      để admin là người chốt thu hồi thủ công.
+    """
+    ai = str(ai_decision or "MONITOR").upper()
+    rule = str(rule_recommendation or "ALLOW").upper()
+    ai_severity = _DECISION_ORDER.get(ai, 1)
+    rule_severity = _DECISION_ORDER.get(rule, 0)
+    highest = max(ai_severity, rule_severity)
+    if highest >= _DECISION_ORDER["REVOKE"]:
+        final = "REVIEW"
+    elif highest >= _DECISION_ORDER["MONITOR"]:
+        final = "MONITOR"
+    else:
+        final = "ALLOW"
+    return {
+        "ai_decision": ai,
+        "rule_recommendation": rule,
+        "decision": final,
+        "requires_admin_action": final == "REVIEW",
+        "overridden_by_rule": final != ai,
+    }
+
+
 def summary_vi(
     risk_score_pct: int,
     risk_level: str,
@@ -127,20 +165,28 @@ def enrich_ai_result(result: dict[str, Any], metric: dict[str, Any]) -> dict[str
 
     rule_level = metric.get("risk_level")
     ai_level = result.get("risk_level")
+    final_decision = compose_final_decision(
+        str(result.get("decision", "MONITOR")),
+        str(metric.get("recommendation", "ALLOW")),
+    )
 
     enriched = dict(result)
+    enriched["ai_decision"] = final_decision["ai_decision"]
+    enriched["decision"] = final_decision["decision"]
+    enriched["requires_admin_action"] = final_decision["requires_admin_action"]
+    enriched["overridden_by_rule"] = final_decision["overridden_by_rule"]
     enriched["behavior_badges"] = badges
     enriched["summary_vi"] = summary_vi(
         int(result.get("risk_score_pct", 0)),
         str(ai_level or ""),
         str(result.get("ai_level_raw", "")),
-        str(result.get("decision", "MONITOR")),
+        str(final_decision["decision"]),
         top_features,
         badges,
     )
     enriched["rule_score"] = metric.get("risk_score")
     enriched["rule_level"] = rule_level
-    enriched["rule_recommendation"] = metric.get("recommendation")
+    enriched["rule_recommendation"] = final_decision["rule_recommendation"]
     enriched["agreement"] = rule_ai_agreement(
         str(rule_level) if rule_level else None,
         str(ai_level) if ai_level else None,
