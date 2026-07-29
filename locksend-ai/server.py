@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from predict import analyze_access, load_bundle
+from predict import analyze_access, analyze_batch_access, load_bundle
 
 API_KEY = os.getenv("LOCKSEND_AI_API_KEY", "").strip()
 _IS_PRODUCTION = os.getenv("APP_ENV", "production").lower() not in ("development", "dev", "test")
@@ -137,8 +137,6 @@ def analyze_many(body: BatchAnalyzeRequest) -> dict[str, Any]:
     import pandas as pd
 
     bundle = _get_bundle()
-    results = []
-    for feat in body.items:
-        row = pd.DataFrame([feat])
-        results.append(analyze_access(row, bundle=bundle))
+    rows = pd.DataFrame(body.items)
+    results = analyze_batch_access(rows, bundle=bundle)
     return {"results": results, "count": len(results)}

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Railway production: railway.json → startCommand "sh start.sh"
 PORT="${PORT:-8000}"
-WEB_CONCURRENCY="${WEB_CONCURRENCY:-2}"
+WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}"
 
 if [ -n "${DATABASE_URL:-}" ]; then
   echo "[start] alembic upgrade head..."

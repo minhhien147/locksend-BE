@@ -132,6 +132,44 @@ def analyze_access(row: pd.DataFrame, bundle: dict | None = None) -> dict:
     }
 
 
+def analyze_batch_access(
+    rows: pd.DataFrame,
+    bundle: dict | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Batch inference tối ưu cho bulk analyze:
+    - chuẩn hóa feature 1 lần cho cả batch
+    - predict_proba 1 lần cho cả batch
+    - bỏ SHAP per-row để tránh nhân CPU theo số token
+    """
+    bundle = bundle or load_bundle()
+    model = bundle["model"]
+    features = bundle["feature_columns"]
+    thresholds = bundle["risk_thresholds"]
+    decision_map = bundle["decision_map"]
+
+    X = prepare_features(rows, features)
+    probs = model.predict_proba(X)[:, 1]
+    results: list[dict[str, Any]] = []
+    for prob_raw in probs:
+        prob = float(prob_raw)
+        level = risk_level(prob, thresholds)
+        decision = decision_for_level(level, decision_map)
+        results.append(
+            {
+                "risk_score": round(prob, 4),
+                "risk_level": level,
+                "decision": decision,
+                "is_attack": prob >= 0.5,
+                "explanation": {
+                    "summary": f"Risk {prob:.1%} → {level} → {decision}.",
+                    "top_features": [],
+                },
+            }
+        )
+    return results
+
+
 def demo_from_test_set(n_samples: int = 3) -> None:
     bundle = load_bundle()
     demos = [
