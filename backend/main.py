@@ -13,7 +13,6 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import logging
 import os
-import uuid
 import warnings
 from contextlib import asynccontextmanager
 
@@ -22,9 +21,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from auth import verify_jwt
-from db.dependencies import get_db_context
-from middleware import SecurityHeadersMiddleware
+from middleware import (
+    RequestIdMiddleware,
+    SecurityHeadersMiddleware,
+    TokenAccessLogMiddleware,
+    start_token_access_log_worker,
+    stop_token_access_log_worker,
+)
 from routers import (
     auth_router,
     integrations_router,
@@ -33,7 +36,6 @@ from routers import (
     upload_router,
     vault_router,
 )
-from services import token_security as ts
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +113,11 @@ async def lifespan(app: FastAPI):
 
     cleanup_task = start_scheduled_cleanup()
     retrain_task = start_scheduled_retrain()
+    start_token_access_log_worker()
     try:
         yield
     finally:
+        await stop_token_access_log_worker()
         await stop_scheduled_cleanup(cleanup_task)
         await stop_scheduled_retrain(retrain_task)
         from services.locksend_ai import close_http_client
@@ -174,82 +178,17 @@ async def _validation_error_handler(request: Request, exc: RequestValidationErro
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 
-_SKIP_LOG_PATHS = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+_SKIP_LOG_PATHS = frozenset({"/health", "/health/deps", "/docs", "/openapi.json", "/redoc"})
 _SENSITIVE_PREFIXES = ("/auth/admin/token-security",)
 
-
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-    request.state.request_id = request_id
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-    return response
-
-
-@app.middleware("http")
-async def jwt_access_log_middleware(request: Request, call_next):
-    """
-    Ghi TokenAccessLog cho mọi request có Bearer token hợp lệ.
-    Bỏ qua: health, docs, token-security admin endpoints.
-    """
-    response = await call_next(request)
-
-    path = request.url.path
-    if path in _SKIP_LOG_PATHS or any(path.startswith(p) for p in _SENSITIVE_PREFIXES):
-        return response
-
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return response
-
-    token_val = auth_header[7:]
-    try:
-        payload = verify_jwt(token_val)
-        jti: str = payload.get("jti", "")
-        user_ext_id: str = payload.get("sub", "")
-        token_ref = f"{jti[:4]}…{jti[-4:]}" if len(jti) > 8 else "***"
-
-        xff = request.headers.get("X-Forwarded-For")
-        ip = xff.split(",")[0].strip() if xff else (
-            request.client.host if request.client else None
-        )
-
-        async with get_db_context() as db:
-            from sqlalchemy import select
-            from db.models import User as _User
-
-            user_row = (
-                await db.execute(select(_User).where(_User.external_id == user_ext_id))
-            ).scalar_one_or_none()
-            user_id = user_row.id if user_row else None
-
-            await ts.log_token_access(
-                db,
-                token_type="jwt",
-                token_ref=token_ref,
-                user_id=user_id,
-                ip_address=ip,
-                user_agent=request.headers.get("User-Agent"),
-                endpoint=path,
-                http_method=request.method,
-                status_code=response.status_code,
-            )
-
-        if user_id and response.status_code < 500:
-            from services.ai_realtime import schedule_token_access_scan
-
-            schedule_token_access_scan(
-                token_type="jwt",
-                token_ref=token_ref,
-                user_id=user_id,
-                endpoint=path,
-                ip_address=ip,
-            )
-    except Exception:
-        pass
-
-    return response
+# Thứ tự add = từ trong ra ngoài, nên TokenAccessLog là lớp ngoài cùng (giữ nguyên
+# thứ tự trước đây). Cả ba đều là pure ASGI — không dùng BaseHTTPMiddleware.
+app.add_middleware(RequestIdMiddleware)
+app.add_middleware(
+    TokenAccessLogMiddleware,
+    skip_paths=_SKIP_LOG_PATHS,
+    skip_prefixes=_SENSITIVE_PREFIXES,
+)
 
 
 # ── Health & root (public) ────────────────────────────────────────────────────

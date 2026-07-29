@@ -32,6 +32,11 @@ import {
 } from "../utils/api";
 import { clearAll as clearKeyVault } from "../utils/keyVault";
 import { clearPageDraft } from "../utils/pageDraft";
+import {
+  clearBrowserSession,
+  isBrowserSessionStale,
+  startBrowserSessionHeartbeat,
+} from "../utils/browserSession";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -80,6 +85,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ── Silent refresh on mount ─────────────────────────────────────────────────
   useEffect(() => {
+    // Trình duyệt đã đóng từ lần truy cập trước: dù cookie có được restore thì
+    // vẫn revoke nó trên server và bắt đăng nhập lại.
+    if (isBrowserSessionStale()) {
+      clearBrowserSession();
+      clearKeyVault();
+      authApi.logout().finally(() => {
+        setAccessToken(null);
+        setUser(null);
+        setIsLoading(false);
+      });
+      return;
+    }
+
     authApi
       .refresh()
       .then((res) => {
@@ -90,9 +108,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Cookie không còn hoặc đã expire — cần đăng nhập lại
         setAccessToken(null);
         setUser(null);
+        clearBrowserSession();
       })
       .finally(() => setIsLoading(false));
   }, []);
+
+  // Chỉ ghi heartbeat khi đang có session → tránh giữ dấu vết sau khi logout.
+  const isAuthenticated = !!user;
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    return startBrowserSessionHeartbeat();
+  }, [isAuthenticated]);
 
   // ── Login ───────────────────────────────────────────────────────────────────
   const login = useCallback(async (username: string, password: string) => {
@@ -125,6 +151,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await authApi.logout(); // revoke refresh token trên server + xóa cookie
     setAccessToken(null);
     setUser(null);
+    clearBrowserSession();
     clearKeyVault(); // xóa private key khỏi RAM + sessionStorage
     clearPageDraft("profile-settings"); // draft cũ (không theo user)
   }, []);
@@ -162,7 +189,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
-      isAuthenticated: !!user,
+      isAuthenticated,
       isLoading,
       login,
       loginWithGoogle,
@@ -173,7 +200,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       updateEmail,
       applyTokenResponse,
     }),
-    [user, isLoading, login, loginWithGoogle, register, logout, changePassword, updateDisplayName, updateEmail, applyTokenResponse]
+    [user, isAuthenticated, isLoading, login, loginWithGoogle, register, logout, changePassword, updateDisplayName, updateEmail, applyTokenResponse]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -14,9 +14,12 @@ Env:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import warnings
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -51,9 +54,39 @@ else:
             stacklevel=1,
         )
 
+_preload_task: asyncio.Task[None] | None = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """
+    Nạp model.pkl ngay lúc boot thay vì ở request đầu tiên — pickle.load của rừng
+    ~95MB mất hàng chục giây trên vCPU chia sẻ, đủ làm client timeout rồi fallback
+    sang gọi lẻ từng token.
+
+    Chạy nền (không await) để /health/live phản hồi ngay cho Railway healthcheck.
+    """
+    global _preload_task
+
+    def _load() -> None:
+        try:
+            _get_bundle()
+            print("[locksend-ai] model preloaded", flush=True)
+        except Exception as exc:
+            print(f"[locksend-ai] WARN: preload model thất bại — {exc}", file=sys.stderr, flush=True)
+
+    _preload_task = asyncio.create_task(asyncio.to_thread(_load))
+    try:
+        yield
+    finally:
+        if _preload_task and not _preload_task.done():
+            _preload_task.cancel()
+
+
 app = FastAPI(
     title="LockSend AI Service",
     version="1.0.0",
+    lifespan=lifespan,
     # Ẩn docs trên production
     docs_url="/docs" if not _IS_PRODUCTION else None,
     redoc_url="/redoc" if not _IS_PRODUCTION else None,
@@ -97,6 +130,12 @@ class AnalyzeRequest(BaseModel):
 
 class BatchAnalyzeRequest(BaseModel):
     items: list[dict[str, float]]
+    explain_top_n: int = Field(
+        default=10,
+        ge=0,
+        le=100,
+        description="Số token rủi ro cao nhất được tính SHAP (0 = tắt giải thích)",
+    )
 
 
 @app.get("/health/live")
@@ -138,5 +177,7 @@ def analyze_many(body: BatchAnalyzeRequest) -> dict[str, Any]:
 
     bundle = _get_bundle()
     rows = pd.DataFrame(body.items)
-    results = analyze_batch_access(rows, bundle=bundle)
+    results = analyze_batch_access(
+        rows, bundle=bundle, explain_top_n=body.explain_top_n
+    )
     return {"results": results, "count": len(results)}

@@ -32,6 +32,9 @@ else:
     COOKIE_SAMESITE = "strict" if COOKIE_SECURE else "lax"
 if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
     COOKIE_SECURE = True
+# Mặc định refresh cookie là session cookie (không Expires/Max-Age) → đóng trình
+# duyệt là mất, user phải đăng nhập lại. Đặt true nếu muốn giữ session 7 ngày.
+REFRESH_COOKIE_PERSIST = os.getenv("REFRESH_COOKIE_PERSIST", "false").lower() == "true"
 
 VALID_ROLES = {"owner", "recipient", "admin"}
 RoleType = Literal["owner", "recipient", "admin"]
@@ -96,6 +99,11 @@ async def issue_refresh_token(
 
 
 def set_refresh_cookie(response: Response, jti: str, expires_at: datetime) -> None:
+    lifetime = (
+        {"expires": expires_at, "max_age": REFRESH_TOKEN_EXPIRE_DAYS * 86400}
+        if REFRESH_COOKIE_PERSIST
+        else {}
+    )
     response.set_cookie(
         key="sf_refresh_token",
         value=jti,
@@ -103,8 +111,7 @@ def set_refresh_cookie(response: Response, jti: str, expires_at: datetime) -> No
         secure=COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
         path="/auth",
-        expires=expires_at,
-        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        **lifetime,
     )
 
 

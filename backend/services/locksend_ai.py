@@ -46,7 +46,15 @@ def _default_ai_dir() -> str:
 _env_dir = os.getenv("LOCKSEND_AI_DIR", "").strip()
 LOCKSEND_AI_DIR = (_env_dir if _env_dir else _default_ai_dir()).replace("\\", "/")
 LOCKSEND_AI_TIMEOUT = float(os.getenv("LOCKSEND_AI_TIMEOUT", "30"))
+# Batch cần timeout dài hơn single: lần chạy nguội phải chờ AI nạp model ~95MB.
+LOCKSEND_AI_BATCH_TIMEOUT = float(os.getenv("LOCKSEND_AI_BATCH_TIMEOUT", "120"))
 MAX_PARALLEL_BATCHES = max(1, int(os.getenv("LOCKSEND_AI_MAX_PARALLEL_BATCHES", "4")))
+# Fallback gọi lẻ từng token có tính SHAP (~1s/token) — chỉ dùng cho batch nhỏ,
+# nếu không 200 token sẽ mất vài phút.
+FALLBACK_MAX_TOKENS = max(0, int(os.getenv("LOCKSEND_AI_FALLBACK_MAX_TOKENS", "20")))
+FALLBACK_CONCURRENCY = max(1, int(os.getenv("LOCKSEND_AI_FALLBACK_CONCURRENCY", "8")))
+# SHAP là phần đắt nhất → mỗi batch chỉ giải thích N token rủi ro cao nhất.
+EXPLAIN_TOP_N = max(0, int(os.getenv("LOCKSEND_AI_EXPLAIN_TOP_N", "10")))
 
 REMOTE_MODE = bool(LOCKSEND_AI_URL)
 
@@ -268,26 +276,83 @@ async def _remote_analyze_token(metric: dict[str, Any]) -> dict[str, Any]:
     return _normalize_result(res.json(), metric)
 
 
+async def _post_analyze_batch(
+    features_list: list[dict[str, float]],
+) -> list[dict[str, Any]]:
+    client = await _get_http_client()
+    res = await client.post(
+        f"{LOCKSEND_AI_URL}/analyze/batch",
+        json={"items": features_list, "explain_top_n": EXPLAIN_TOP_N},
+        headers=_auth_headers(),
+        timeout=LOCKSEND_AI_BATCH_TIMEOUT,
+    )
+    res.raise_for_status()
+    return res.json().get("results", [])
+
+
+async def _warmup_remote() -> None:
+    """Gọi /health để buộc AI nạp xong model trước khi retry batch."""
+    health_data = await _remote_health()
+    if not health_data.get("ready"):
+        logger.warning(
+            "LockSend AI chưa ready sau warm-up: %s",
+            health_data.get("error") or health_data,
+        )
+
+
+def _error_results(
+    metrics: list[dict[str, Any]],
+    message: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "token_id": m.get("token_id"),
+            "token_type": m.get("token_type"),
+            "error": message,
+        }
+        for m in metrics
+    ]
+
+
 async def _remote_analyze_batch_fallback(
     metrics: list[dict[str, Any]],
+    *,
+    reason: str,
 ) -> list[dict[str, Any]]:
     """
-    Fallback khi endpoint /analyze/batch lỗi hoặc timeout:
-    gọi /analyze từng token để không làm hỏng cả job.
+    Fallback khi endpoint /analyze/batch lỗi cả sau warm-up: gọi /analyze từng token
+    để không làm hỏng cả job.
+
+    Đường này tính SHAP cho từng token nên đắt hơn batch nhiều lần — chỉ chạy khi số
+    token còn nhỏ, và chạy song song có giới hạn thay vì tuần tự.
     """
-    results: list[dict[str, Any]] = []
-    for metric in metrics:
-        try:
-            results.append(await _remote_analyze_token(metric))
-        except Exception as exc:
-            results.append(
-                {
+    if len(metrics) > FALLBACK_MAX_TOKENS:
+        logger.error(
+            "LockSend AI batch lỗi (%s) — bỏ qua fallback per-token cho %d token "
+            "(giới hạn %d) để tránh job kéo dài hàng phút",
+            reason,
+            len(metrics),
+            FALLBACK_MAX_TOKENS,
+        )
+        return _error_results(
+            metrics,
+            f"AI batch endpoint không phản hồi: {reason}",
+        )
+
+    sem = asyncio.Semaphore(FALLBACK_CONCURRENCY)
+
+    async def _one(metric: dict[str, Any]) -> dict[str, Any]:
+        async with sem:
+            try:
+                return await _remote_analyze_token(metric)
+            except Exception as exc:
+                return {
                     "token_id": metric.get("token_id"),
                     "token_type": metric.get("token_type"),
                     "error": str(exc),
                 }
-            )
-    return results
+
+    return list(await asyncio.gather(*(_one(m) for m in metrics)))
 
 
 def _local_analyze_token(metric: dict[str, Any]) -> dict[str, Any]:
@@ -316,20 +381,18 @@ async def analyze_batch(
     if REMOTE_MODE:
         features_list = [_token_metric_to_cic(m) for m in metrics]
         try:
-            client = await _get_http_client()
-            res = await client.post(
-                f"{LOCKSEND_AI_URL}/analyze/batch",
-                json={"items": features_list},
-                headers=_auth_headers(),
-            )
-            res.raise_for_status()
-            raw_results = res.json().get("results", [])
+            raw_results = await _post_analyze_batch(features_list)
         except httpx.HTTPError as exc:
-            logger.warning(
-                "LockSend AI batch endpoint failed, fallback to single-token analyze: %s",
-                exc,
-            )
-            return await _remote_analyze_batch_fallback(metrics)
+            # Nguyên nhân thường gặp: AI đang nạp model → warm-up rồi thử lại 1 lần
+            # trước khi hạ xuống đường gọi lẻ.
+            logger.warning("LockSend AI batch lỗi (%s) — warm-up rồi retry", exc)
+            await _warmup_remote()
+            try:
+                raw_results = await _post_analyze_batch(features_list)
+            except httpx.HTTPError as retry_exc:
+                return await _remote_analyze_batch_fallback(
+                    metrics, reason=str(retry_exc)
+                )
 
         results: list[dict[str, Any]] = []
         for metric, raw in zip(metrics, raw_results):
@@ -350,11 +413,32 @@ async def analyze_batch(
                 })
         return results
 
+    return await asyncio.to_thread(_local_analyze_batch, metrics)
+
+
+def _local_analyze_batch(metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Local mode — dùng cùng đường batch như remote để có chung đặc tính hiệu năng."""
     _ensure_loaded()
-    results = []
-    for m in metrics:
+    import pandas as pd
+
+    try:
+        from predict import analyze_batch_access  # type: ignore[import]
+
+        rows = pd.DataFrame([_token_metric_to_cic(m) for m in metrics])
+        raw_results = analyze_batch_access(
+            rows, bundle=_bundle, explain_top_n=EXPLAIN_TOP_N
+        )
+    except Exception as exc:
+        logger.warning("local batch analyze failed, fallback per-token: %s", exc)
+        raw_results = []
+
+    results: list[dict[str, Any]] = []
+    for idx, m in enumerate(metrics):
         try:
-            results.append(_local_analyze_token(m))
+            if idx < len(raw_results):
+                results.append(_normalize_result(raw_results[idx], m))
+            else:
+                results.append(_local_analyze_token(m))
         except Exception as exc:
             logger.warning("analyze_token failed for %s: %s", m.get("token_id"), exc)
             results.append({
