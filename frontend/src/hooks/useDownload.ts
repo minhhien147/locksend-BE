@@ -121,8 +121,9 @@ export function useDownload(): UseDownloadReturn {
     serverFileId?: string
   ): Promise<void> {
     const isChunked = (metadata as ChunkedEncryptionMetadata).isChunked ?? false;
+    // A02: sasUrl không được lưu vào lịch sử (xem downloadHistory.ts) — chỉ dùng
+    // cho lần ghi log này rồi bỏ.
     saveDownloadEntry({
-      sasUrl: logSasUrl,
       fileName: metadata.fileName,
       mimeType: metadata.mimeType,
       fileSizeBytes,

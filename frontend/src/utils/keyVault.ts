@@ -29,7 +29,7 @@ import { toBase64, fromBase64 } from "./crypto";
 
 const SESSION_WRAPPER_KEY = "ls_sw";  // Encrypted key blob trong sessionStorage
 const SESSION_KEY_KEY = "ls_sk";      // Ephemeral AES key trong sessionStorage
-export const AUTO_LOCK_MS = 15 * 60 * 1000; // 15 phút không hoạt động
+export const AUTO_LOCK_MS = 30 * 60 * 1000; // 30 phút không hoạt động
 
 // ── State ─────────────────────────────────────────────────────────────────────
 

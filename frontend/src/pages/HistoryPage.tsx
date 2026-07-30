@@ -514,11 +514,6 @@ function DownloadHistory() {
   const t = useT();
   const [items, setItems] = useState<DownloadHistoryItem[]>(() => getDownloadHistory());
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useDraftState<string | null>(
-    HISTORY_PAGE_KEY,
-    "downloadExpandedId",
-    null
-  );
 
   async function handleCopy(text: string, key: string) {
     await navigator.clipboard.writeText(text);
@@ -555,7 +550,6 @@ function DownloadHistory() {
         <EmptyState icon="download" message={t("history.empty")} />
       ) : (
         items.map((item) => {
-          const isExpanded = expandedId === item.id;
           return (
             <div key={item.id} className={surfaceListItem}>
               <div className="flex items-start justify-between gap-3">
@@ -596,27 +590,6 @@ function DownloadHistory() {
                 </div>
               )}
 
-              <div>
-                <button
-                  onClick={() => setExpandedId(isExpanded ? null : item.id)}
-                  className={`text-[12px] transition flex items-center gap-1 ${text.muted} hover:text-slate-600 dark:hover:text-slate-300`}
-                >
-                  <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                  </svg>
-                  {isExpanded ? t("history.hideSas") : t("history.showSas")}
-                </button>
-                {isExpanded && (
-                  <div className={`mt-2 flex items-center gap-2 ${surfaceInset}`}>
-                    <input readOnly value={item.sasUrl}
-                      className={`flex-1 text-[11px] bg-transparent outline-none truncate font-mono ${text.secondary}`} />
-                    <button onClick={() => handleCopy(item.sasUrl, item.id + "_sas")}
-                      className={`text-[11px] px-2 py-1 rounded-md border border-slate-200 dark:border-white/10 shrink-0 transition ${text.muted} hover:bg-slate-100 dark:hover:bg-white/[0.06]`}>
-                      {copiedId === item.id + "_sas" ? "✓ Copied" : t("common.copy")}
-                    </button>
-                  </div>
-                )}
-              </div>
             </div>
           );
         })

@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import api from "../utils/api";
 import PageLoader, { LoadingSpinner } from "../components/LoadingSpinner";
-import { admin, surfaceCard } from "../styles/theme";
+import { admin, inputBase, surfaceCard } from "../styles/theme";
 import { useT } from "../i18n/context";
 
 interface UserRow {
@@ -39,11 +39,21 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [changing, setChanging] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
-  const fetchUsers = async () => {
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  const fetchUsers = useCallback(async (query?: string) => {
     try {
       setLoading(true);
-      const res = await api.get<UserRow[]>("/auth/admin/users");
+      const q = (query ?? "").trim();
+      const res = await api.get<UserRow[]>("/auth/admin/users", {
+        params: q ? { q } : undefined,
+      });
       setUsers(res.data);
       setError(null);
     } catch {
@@ -51,11 +61,11 @@ export default function AdminUsersPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
 
   useEffect(() => {
-    void fetchUsers();
-  }, []);
+    void fetchUsers(debouncedSearch);
+  }, [debouncedSearch, fetchUsers]);
 
   const handleRoleChange = async (userId: string, newRole: Role) => {
     setChanging(userId);
@@ -112,7 +122,7 @@ export default function AdminUsersPage() {
         </div>
         <button
           type="button"
-          onClick={() => void fetchUsers()}
+          onClick={() => void fetchUsers(debouncedSearch)}
           disabled={loading}
           className={`${admin.btnGhost} self-start`}
         >
@@ -123,6 +133,26 @@ export default function AdminUsersPage() {
           )}
           {t("admin.refresh")}
         </button>
+      </div>
+
+      <div className="relative max-w-md">
+        <svg
+          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M11 18a7 7 0 100-14 7 7 0 000 14z" />
+        </svg>
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={t("admin.usersPage.searchPlaceholder")}
+          className={`w-full rounded-lg py-2.5 pl-10 pr-3 text-sm ${inputBase}`}
+          aria-label={t("admin.usersPage.searchPlaceholder")}
+        />
       </div>
 
       {error && (
@@ -159,7 +189,11 @@ export default function AdminUsersPage() {
             className="py-12"
           />
         ) : users.length === 0 ? (
-          <div className={`py-16 text-center ${admin.empty}`}>{t("admin.usersPage.empty")}</div>
+          <div className={`py-16 text-center ${admin.empty}`}>
+            {debouncedSearch
+              ? t("admin.usersPage.emptySearch", { q: debouncedSearch })
+              : t("admin.usersPage.empty")}
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[640px]">

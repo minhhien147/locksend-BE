@@ -456,6 +456,8 @@ export const en = {
       deleteFailed: "Could not delete user",
       loading: "Loading users…",
       empty: "No users yet",
+      searchPlaceholder: "Search by email or display name…",
+      emptySearch: 'No results for "{q}"',
       colUser: "User",
       colRole: "Role",
       colPlan: "Storage plan",

@@ -14,7 +14,7 @@ import {
   DEFAULT_CHUNK_SIZE,
   type ChunkedEncryptionMetadata,
 } from "../utils/crypto";
-import { getKeys } from "../utils/keyVault";
+import { getKeys, resetLockTimer } from "../utils/keyVault";
 import {
   uploadEncryptedFile,
   initMultipartUpload,
@@ -22,6 +22,7 @@ import {
   finalizeMultipartUpload,
   type RecipientPayload,
 } from "../utils/api";
+import { apiErrorDetail } from "../utils/api/client";
 import { useT } from "../i18n/context";
 import { useTransferTimer } from "./useTransferTimer";
 import { computeTransferStats, type TransferStats } from "../utils/transferStats";
@@ -330,11 +331,17 @@ export function useUpload(): UseUploadReturn {
         const totalChunks = Math.ceil(file.size / DEFAULT_CHUNK_SIZE);
         setState((prev) => ({ ...prev, stage: "uploading" }));
 
-        const { blob_name } = await initMultipartUpload(file.name, signal);
+        const { blob_name } = await initMultipartUpload(
+          file.name,
+          signal,
+          DEFAULT_CHUNK_SIZE
+        );
         const chunkChecksums: string[] = [];
 
         for (let i = 0; i < totalChunks; i++) {
           if (signal.aborted) throw new Error("CANCELLED");
+          // Upload dài có thể >15 phút — reset auto-lock vault để không bị hỏi passphrase giữa chừng.
+          resetLockTimer();
           const start = i * DEFAULT_CHUNK_SIZE;
           const end = Math.min(start + DEFAULT_CHUNK_SIZE, file.size);
           const chunkSizeMB = parseFloat(
@@ -447,7 +454,7 @@ export function useUpload(): UseUploadReturn {
         cancel();
         throw new Error("CANCELLED");
       }
-      const msg = (e as Error)?.message ?? t("common.unknownError");
+      const msg = apiErrorDetail(e, t("common.unknownError"));
       setState((prev) => ({
         ...prev,
         error: msg,

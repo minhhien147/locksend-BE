@@ -458,6 +458,8 @@ export const vi = {
       deleteFailed: "Xóa user thất bại",
       loading: "Đang tải danh sách người dùng…",
       empty: "Chưa có user nào",
+      searchPlaceholder: "Tìm theo email hoặc tên hiển thị…",
+      emptySearch: 'Không có kết quả cho "{q}"',
       colUser: "Người dùng",
       colRole: "Role",
       colPlan: "Gói lưu trữ",

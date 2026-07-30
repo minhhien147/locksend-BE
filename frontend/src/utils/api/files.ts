@@ -1,7 +1,10 @@
 /** files.ts — Upload, download, multipart, file history, shared-with-me API. */
 
 import { api } from "./client";
-import type { EncryptionMetadata, ChunkedEncryptionMetadata } from "../crypto";
+import { DEFAULT_CHUNK_SIZE, type EncryptionMetadata, type ChunkedEncryptionMetadata } from "../crypto";
+
+/** Chunk/finalize upload: không giới hạn timeout (mạng chậm + chunk 64MB có thể > 5 phút). */
+const UPLOAD_XFER_TIMEOUT_MS = 0;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -151,6 +154,7 @@ export async function uploadEncryptedFile(
 
   const response = await api.post<UploadResponse>("/upload", formData, {
     headers: { "Content-Type": "multipart/form-data" },
+    timeout: UPLOAD_XFER_TIMEOUT_MS,
     onUploadProgress: onProgress
       ? (e) => onProgress(e.loaded, e.total ?? ciphertext.byteLength)
       : undefined,
@@ -163,10 +167,12 @@ export async function uploadEncryptedFile(
 
 export async function initMultipartUpload(
   fileName: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  chunkSizeBytes: number = DEFAULT_CHUNK_SIZE
 ): Promise<MultipartInitResponse> {
   const formData = new FormData();
   formData.append("filename", fileName);
+  formData.append("chunk_size_bytes", String(chunkSizeBytes));
   const response = await api.post<MultipartInitResponse>(
     "/upload/multipart/init",
     formData,
@@ -183,9 +189,8 @@ export async function uploadChunk(
   signal?: AbortSignal
 ): Promise<void> {
   const formData = new FormData();
-  const blob = new Blob([chunkData.buffer as ArrayBuffer], {
-    type: "application/octet-stream",
-  });
+  // Dùng Uint8Array view — .buffer có thể lớn hơn chunk thật (byteOffset/byteLength).
+  const blob = new Blob([chunkData], { type: "application/octet-stream" });
   formData.append("chunk", blob, `chunk_${chunkIndex}`);
 
   await api.put(
@@ -193,6 +198,7 @@ export async function uploadChunk(
     formData,
     {
       headers: { "Content-Type": "multipart/form-data" },
+      timeout: UPLOAD_XFER_TIMEOUT_MS,
       onUploadProgress: onProgress
         ? (e) => onProgress(e.loaded, e.total ?? chunkData.byteLength)
         : undefined,
@@ -217,8 +223,11 @@ export async function finalizeMultipartUpload(
       recipients: recipients ?? [],
       storage_mode: options?.storageMode ?? "share",
       folder_id: options?.storageMode === "vault" ? options.folderId ?? null : null,
+      file_size_bytes: metadata.fileSize,
+      chunk_size_bytes: metadata.chunkSize,
+      original_filename: metadata.fileName,
     },
-    { signal }
+    { signal, timeout: UPLOAD_XFER_TIMEOUT_MS }
   );
   return response.data;
 }

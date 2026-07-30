@@ -112,3 +112,32 @@ export function migrateLegacyScalar(
     return null;
   }
 }
+
+/**
+ * A02: Xoá một field khỏi draft đã lưu trên sessionStorage.
+ * Dùng cho field secret (SAS URL) mà bản trước từng persist.
+ */
+export function purgeStorageField(pageKey: string, field: string): void {
+  try {
+    const bag = readStorageBag(pageKey);
+    if (!(field in bag)) return;
+    delete bag[field];
+    sessionStorage.setItem(storageKey(pageKey), JSON.stringify(bag));
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * A02: Đọc legacy key rồi xoá, KHÔNG persist lại giá trị.
+ * Dùng cho giá trị không được phép nằm trên disk/sessionStorage.
+ */
+export function takeLegacyScalar(legacyKey: string): string | null {
+  try {
+    const raw = sessionStorage.getItem(legacyKey);
+    if (raw) sessionStorage.removeItem(legacyKey);
+    return raw;
+  } catch {
+    return null;
+  }
+}

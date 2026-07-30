@@ -427,6 +427,7 @@ export default function AdminTokenSecurityPage() {
   const [savedReportsLoading, setSavedReportsLoading] = useState(false);
   const [selectedReportJobId, setSelectedReportJobId] = useState<string | null>(null);
   const [selectedReportMeta, setSelectedReportMeta] = useState<AiAnalysisJob | null>(null);
+  const [reportDetailLoading, setReportDetailLoading] = useState<string | null>(null);
 
   const [_activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<AiAnalysisJob | null>(null);
@@ -569,14 +570,17 @@ export default function AdminTokenSecurityPage() {
   }, []);
 
   const loadSavedReport = useCallback(async (jobId: string) => {
+    setReportDetailLoading(jobId);
     try {
       const res = await api.get<AiAnalysisJob>(
         `/auth/admin/token-security/ai/jobs/${jobId}`,
-        { params: { include_details: true, snapshots_limit: 500 } }
+        { params: { include_details: true, snapshots_limit: 2000 } }
       );
       applySavedReport(res.data);
     } catch {
       setAiError("Không tải được report đã lưu.");
+    } finally {
+      setReportDetailLoading(null);
     }
   }, [applySavedReport]);
 
@@ -829,15 +833,17 @@ export default function AdminTokenSecurityPage() {
   const pollJob = useCallback(
     async (jobId: string) => {
       try {
+        // Poll chỉ lấy tiến trình — snapshot chi tiết được nạp 1 lần khi job xong.
         const res = await api.get<AiAnalysisJob>(
           `/auth/admin/token-security/ai/jobs/${jobId}`,
-          { params: { include_details: true } }
+          { params: { include_details: false } }
         );
         const job = res.data;
         setActiveJob(job);
         if (job.status === "completed") {
-            upsertSavedReport(job);
-          applySavedReport(job);
+          upsertSavedReport(job);
+          setSelectedReportJobId(job.job_id);
+          setSelectedReportMeta(job);
           void loadSavedReports(jobId);
           setActiveTab("ai-report");
           const summary = job.result_summary;
@@ -873,7 +879,7 @@ export default function AdminTokenSecurityPage() {
         setActiveJobId(null);
       }
     },
-    [applySavedReport, loadSavedReports, t, upsertSavedReport]
+    [loadSavedReports, t, upsertSavedReport]
   );
 
   useEffect(() => {
@@ -1833,10 +1839,22 @@ export default function AdminTokenSecurityPage() {
               <div className={`${surfaceCard} p-5`}>
                 <div className="flex flex-wrap items-center gap-3 mb-3">
                   <h3 className="text-sm font-semibold text-emerald-300">{t("admin.tokenSecurity.aiResults")}</h3>
+                  {selectedReportMeta && (
+                    <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                      Report {selectedReportMeta.job_id.slice(0, 8)}
+                    </span>
+                  )}
                   <span className="text-xs text-slate-500 dark:text-white/30">{t("admin.tokenSecurity.tokensAnalyzed", { count: aiResults.length })}</span>
                   {selectedReportMeta?.created_at && (
                     <span className="text-xs text-slate-500 dark:text-white/30">
                       Saved at {new Date(selectedReportMeta.created_at).toLocaleString("vi-VN")}
+                    </span>
+                  )}
+                  {selectedReportMeta?.result_summary && (
+                    <span className="text-xs text-slate-500 dark:text-white/30">
+                      Requested {selectedReportMeta.result_summary.total_requested}
+                      {" · "}
+                      Skipped {selectedReportMeta.result_summary.skipped_benign ?? selectedReportMeta.result_summary.skipped_recent}
                     </span>
                   )}
                   <button
@@ -2030,17 +2048,29 @@ export default function AdminTokenSecurityPage() {
               <div className="space-y-2">
                 {visibleSavedReports.map((job) => {
                   const isActive = job.job_id === selectedReportJobId;
+                  const isLoadingDetail = reportDetailLoading === job.job_id;
                   const createdAt = job.created_at
                     ? new Date(job.created_at).toLocaleString("vi-VN")
                     : "Unknown time";
                   const analyzed = job.result_summary?.ai_analyzed ?? job.analyzed_count;
                   const skipped = job.result_summary?.skipped_benign ?? job.result_summary?.skipped_recent ?? job.skipped_cached;
+                  const durationSec =
+                    job.started_at && job.completed_at
+                      ? Math.max(
+                          0,
+                          Math.round(
+                            (new Date(job.completed_at).getTime() -
+                              new Date(job.started_at).getTime()) / 1000
+                          )
+                        )
+                      : null;
                   return (
                     <button
                       key={job.job_id}
                       type="button"
                       onClick={() => void loadSavedReport(job.job_id)}
-                      className={`w-full rounded-xl border px-4 py-3 text-left transition ${
+                      disabled={isLoadingDetail}
+                      className={`w-full rounded-xl border px-4 py-3 text-left transition disabled:opacity-60 ${
                         isActive
                           ? "border-emerald-500/30 bg-emerald-500/10"
                           : "border-white/10 bg-slate-950/40 hover:bg-white/[0.04]"
@@ -2049,6 +2079,9 @@ export default function AdminTokenSecurityPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-medium text-white/85">Report {job.job_id.slice(0, 8)}</span>
                         <span className="text-[11px] text-slate-500">{createdAt}</span>
+                        <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] font-medium text-slate-300 uppercase">
+                          {job.token_type}
+                        </span>
                         {job.status !== "completed" && (
                           <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300">
                             {job.status}
@@ -2058,12 +2091,36 @@ export default function AdminTokenSecurityPage() {
                           {analyzed} analyzed · {skipped} skipped
                         </span>
                       </div>
-                      <div className="mt-1 text-[11px] text-slate-500 dark:text-white/35">
-                        Saved snapshots: {job.result_summary?.saved_snapshots ?? 0}
-                        <span className="mx-2">·</span>
-                        High risk: {job.result_summary?.high_risk_count ?? 0}
-                        <span className="mx-2">·</span>
-                        Revoke: {job.result_summary?.revoke_recommendations ?? 0}
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-slate-500 dark:text-white/35">
+                        <span>Saved snapshots: {job.result_summary?.saved_snapshots ?? 0}</span>
+                        <span>·</span>
+                        <span>High risk: {job.result_summary?.high_risk_count ?? 0}</span>
+                        <span>·</span>
+                        <span>Revoke: {job.result_summary?.revoke_recommendations ?? 0}</span>
+                        {job.failed_count > 0 && (
+                          <>
+                            <span>·</span>
+                            <span className="text-rose-300/80">Failed: {job.failed_count}</span>
+                          </>
+                        )}
+                        {durationSec !== null && (
+                          <>
+                            <span>·</span>
+                            <span>{durationSec}s</span>
+                          </>
+                        )}
+                        <span className="ml-auto inline-flex items-center gap-1.5 font-medium text-emerald-300/90">
+                          {isLoadingDetail ? (
+                            <>
+                              <LoadingSpinner size="sm" />
+                              Đang tải chi tiết…
+                            </>
+                          ) : isActive ? (
+                            "Đang xem chi tiết"
+                          ) : (
+                            "Xem chi tiết →"
+                          )}
+                        </span>
                       </div>
                     </button>
                   );

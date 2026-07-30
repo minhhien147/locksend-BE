@@ -30,6 +30,9 @@ export default defineConfig(({ mode }) => {
       },
     },
     build: {
+      // A05: nói rõ ràng thay vì dựa vào default của Vite — source map trên
+      // production làm lộ toàn bộ source, kể cả logic crypto phía client.
+      sourcemap: false,
       rollupOptions: {
         output: {
           manualChunks: (id) => {

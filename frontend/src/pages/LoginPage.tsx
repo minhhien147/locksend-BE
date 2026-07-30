@@ -18,12 +18,22 @@ import { isValidAlertEmail } from "../utils/email";
 import { useT, translateError } from "../i18n/context";
 import { shell, inputBase, text, brand, label, btn, linkAccent } from "../styles/theme";
 
+function safeInternalPath(value: string | undefined): string {
+  if (typeof value !== "string") return "/";
+  // Chặn absolute URL ("https://evil.com") và protocol-relative ("//evil.com").
+  if (!value.startsWith("/") || value.startsWith("//")) return "/";
+  if (value.includes("\\")) return "/";
+  return value;
+}
+
 export default function LoginPage() {
   const t = useT();
   const { login, loginWithGoogle, isLoading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const from = (location.state as { from?: string })?.from || "/";
+  // A01: chỉ nhận đường dẫn nội bộ. `//evil.com` hay `https://evil.com` là URL
+  // hợp lệ với navigate() nên sẽ thành open redirect sau khi đăng nhập.
+  const from = safeInternalPath((location.state as { from?: string })?.from);
 
   const clearLoginDraft = useClearPageDraft(LOGIN_PAGE_KEY);
   const [username, setUsername] = useDraftState(LOGIN_PAGE_KEY, "username", "");

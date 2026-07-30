@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useDownload } from "../hooks/useDownload";
 import { useClearPageDraft, useDraftState } from "../hooks/useDraftState";
-import { migrateLegacyScalar } from "../utils/pageDraft";
+import { purgeStorageField, takeLegacyScalar } from "../utils/pageDraft";
 
 const PAGE_KEY = "download";
 import { LoadingSpinner } from "../components/LoadingSpinner";
@@ -18,10 +18,14 @@ import { inputBase, label } from "../styles/theme";
 export default function DownloadPage() {
   const t = useT();
   const clearDownloadDraft = useClearPageDraft(PAGE_KEY);
-  const [sasUrl, setSasUrl] = useDraftState(PAGE_KEY, "sasUrl", "");
+  // A02: SAS URL là bearer credential của blob — giữ trong RAM, không ghi vào
+  // sessionStorage (mọi script cùng origin đọc được cho tới khi đóng tab).
+  const [sasUrl, setSasUrl] = useDraftState(PAGE_KEY, "sasUrl", "", "memory");
 
   useEffect(() => {
-    const legacy = migrateLegacyScalar("sfs_download_sas_draft", PAGE_KEY, "sasUrl");
+    // Dọn SAS mà bản cũ đã persist, và không ghi lại xuống sessionStorage.
+    purgeStorageField(PAGE_KEY, "sasUrl");
+    const legacy = takeLegacyScalar("sfs_download_sas_draft");
     if (legacy) setSasUrl(legacy);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- migration once on mount
   }, []);
