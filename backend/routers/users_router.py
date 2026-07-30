@@ -4,8 +4,8 @@ from __future__ import annotations
 import logging
 import uuid as _uuid_mod
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import delete, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import audit
@@ -149,18 +149,35 @@ async def admin_get_display_name_history(
 @router.get("/admin/users", response_model=list[UserOut], tags=["admin"])
 async def list_users(
     request: Request,
+    q: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="Tìm theo email hoặc tên hiển thị (không phân biệt hoa thường)",
+    ),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Danh sách tất cả user — chỉ admin."""
+    """Danh sách user — chỉ admin. Có thể lọc theo email/tên qua ?q=."""
     require_admin(current)
-    rows = (await db.execute(select(User).order_by(User.created_at.desc()))).scalars().all()
+    stmt = select(User).order_by(User.created_at.desc())
+    query = (q or "").strip()
+    if query:
+        term = f"%{query}%"
+        stmt = stmt.where(
+            or_(
+                User.email.ilike(term),
+                User.display_name.ilike(term),
+            )
+        )
+    rows = (await db.execute(stmt)).scalars().all()
     audit.log_event(
         "admin.list_users",
         user_id=current.id,
         role=current.role,
         request_id=audit.get_request_id(request),
         count=len(rows),
+        query=query or None,
     )
     return [to_user_out(u) for u in rows]
 
