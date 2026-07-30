@@ -279,18 +279,10 @@ async def multipart_finalize(
     except (json.JSONDecodeError, AttributeError):
         has_chunk_checksums = False
 
-    metadata_b64 = b64mod.b64encode(body.metadata_json.encode("utf-8")).decode("ascii")
-
     try:
         client = get_blob_service_client()
         blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
-        blob_client.commit_block_list(
-            block_ids,
-            metadata={
-                "encryption_metadata_b64": metadata_b64,
-                "has_chunk_checksums": str(has_chunk_checksums).lower(),
-            },
-        )
+        blob_client.commit_block_list(block_ids)
     except Exception as exc:
         logger.exception("Commit block list failed: %s", exc)
         raise HTTPException(status_code=500, detail="Commit block list failed")

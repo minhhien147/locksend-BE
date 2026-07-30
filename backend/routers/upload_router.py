@@ -330,13 +330,9 @@ async def multipart_finalize(
     try:
         client = get_blob_service_client()
         blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
-        blob_client.commit_block_list(
-            block_ids,
-            metadata=azure_encryption_blob_metadata(
-                body.metadata_json,
-                has_chunk_checksums=has_chunk_checksums,
-            ),
-        )
+        # Không gắn metadata lúc commit — file lớn có chunkChecksums[] làm metadata
+        # vượt 8 KB Azure và commit_block_list 500. Metadata đầy đủ lưu DB + set_blob_metadata sau.
+        blob_client.commit_block_list(block_ids)
     except Exception as exc:
         logger.exception("Commit block list failed: %s", exc)
         raise HTTPException(status_code=500, detail="Commit block list failed")
