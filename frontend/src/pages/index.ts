@@ -1,4 +1,5 @@
 export { default as AdminLayout } from "./AdminLayout";
+export { default as AdminActivityPage } from "./AdminActivityPage";
 export { default as AdminTokenSecurityPage } from "./AdminTokenSecurityPage";
 export { default as AdminUsersPage } from "./AdminUsersPage";
 export { default as DownloadPage } from "./DownloadPage";

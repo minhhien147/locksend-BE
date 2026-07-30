@@ -30,6 +30,7 @@ import ProfilePage from "../pages/ProfilePage";
 import KeyManagement from "../pages/KeyManagement";
 import AdminLayout from "../pages/AdminLayout";
 import AdminUsersPage from "../pages/AdminUsersPage";
+import AdminActivityPage from "../pages/AdminActivityPage";
 import AdminTokenSecurityPage from "../pages/AdminTokenSecurityPage";
 
 // ── Nav icons ─────────────────────────────────────────────────────────────────
@@ -316,6 +317,7 @@ export default function AppShell() {
             >
               <Route index element={<Navigate to="users" replace />} />
               <Route path="users" element={<AdminUsersPage />} />
+              <Route path="activity" element={<AdminActivityPage />} />
               <Route path="token-security" element={<AdminTokenSecurityPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

@@ -226,6 +226,9 @@ export const admin = {
   navActiveUsers:
     "bg-slate-900 text-rose-200 ring-1 ring-slate-600 " +
     "dark:bg-rose-500/15 dark:text-rose-300 dark:ring-rose-400/25",
+  navActiveActivity:
+    "bg-slate-900 text-sky-200 ring-1 ring-slate-600 " +
+    "dark:bg-sky-500/15 dark:text-sky-300 dark:ring-sky-400/25",
   navActiveToken:
     "bg-slate-900 text-violet-200 ring-1 ring-slate-600 " +
     "dark:bg-violet-500/15 dark:text-violet-300 dark:ring-violet-400/25",
