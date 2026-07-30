@@ -189,8 +189,9 @@ export async function uploadChunk(
   signal?: AbortSignal
 ): Promise<void> {
   const formData = new FormData();
-  // Dùng Uint8Array view — .buffer có thể lớn hơn chunk thật (byteOffset/byteLength).
-  const blob = new Blob([chunkData], { type: "application/octet-stream" });
+  const blob = new Blob([new Uint8Array(chunkData)], {
+    type: "application/octet-stream",
+  });
   formData.append("chunk", blob, `chunk_${chunkIndex}`);
 
   await api.put(
