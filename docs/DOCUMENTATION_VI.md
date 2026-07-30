@@ -19,11 +19,12 @@ Tài liệu này mô tả **trạng thái code thực tế** trong repo (không 
 
 ```
 secure-file-sharing/
-├── backend/
-│   ├── main.py              # FastAPI app, CORS, upload, multipart, keys, SAS, files, admin
+├── backend/                 # Canonical FastAPI API (Railway Root Directory)
+│   ├── main.py              # FastAPI app, CORS, routers, lifespan
 │   ├── auth.py              # verify JWT, get_current_user, require_roles
 │   ├── audit.py             # structured audit log + redaction
-│   ├── routers/auth_router.py
+│   ├── routers/             # auth, upload, download, vault, keys, …
+│   ├── services/            # Azure, email, token security, AI helpers
 │   ├── db/
 │   │   ├── models.py        # ORM mirrors schema.sql + migrations mở rộng
 │   │   ├── session.py       # AsyncEngine PostgreSQL (asyncpg)
@@ -48,8 +49,9 @@ secure-file-sharing/
 │   ├── vite.config.ts       # proxy /api → localhost:8000
 │   └── .env.example         # VITE_API_URL
 ├── locksend-ai/             # ML token security (tùy chọn)
-├── README.md
-└── DOCUMENTATION_VI.md       # file này
+├── docs/                    # Tài liệu đồ án / API / security / flow
+│   └── DOCUMENTATION_VI.md  # file này
+└── README.md
 ```
 
 ---
@@ -98,7 +100,7 @@ Nguồn phiên bản: `frontend/package.json`, `backend/requirements.txt`.
 
 | Công nghệ | Mục đích |
 |-----------|----------|
-| `locksend-ai/` + `backend/requirements-ai.txt` | Random Forest + SHAP; Admin Token Security — xem [locksend-ai/README.md](./locksend-ai/README.md) |
+| `locksend-ai/` + `backend/requirements-ai.txt` | Random Forest + SHAP; Admin Token Security — xem [locksend-ai/README.md](../locksend-ai/README.md) |
 
 ### 3.5 Triển khai (tham khảo)
 

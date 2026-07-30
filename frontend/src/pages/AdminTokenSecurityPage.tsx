@@ -446,6 +446,7 @@ export default function AdminTokenSecurityPage() {
   const [fileDetail, setFileDetail] = useState<FileDetailData | null>(null);
   const [fileDetailLoading, setFileDetailLoading] = useState(false);
   const [notifyOwnerBusy, setNotifyOwnerBusy] = useState(false);
+  const [modelInfoOpen, setModelInfoOpen] = useState(false);
 
   const flash = (type: "ok" | "err", msg: string) => {
     setFeedback({ type, msg });
@@ -572,13 +573,38 @@ export default function AdminTokenSecurityPage() {
   const loadSavedReport = useCallback(async (jobId: string) => {
     setReportDetailLoading(jobId);
     try {
-      const res = await api.get<AiAnalysisJob>(
-        `/auth/admin/token-security/ai/jobs/${jobId}`,
-        { params: { include_details: true, snapshots_limit: 2000 } }
+      // Production cũ có le=500; bản mới le=5000. Dùng 500 rồi fallback nếu cần.
+      const limits = [500, 200];
+      let lastErr: unknown = null;
+      for (const limit of limits) {
+        try {
+          const res = await api.get<AiAnalysisJob>(
+            `/auth/admin/token-security/ai/jobs/${jobId}`,
+            { params: { include_details: true, snapshots_limit: limit } }
+          );
+          applySavedReport(res.data);
+          return;
+        } catch (err: unknown) {
+          lastErr = err;
+          const status = (err as { response?: { status?: number } })?.response?.status;
+          // 422 = query param ngoài bound (snapshots_limit) → thử limit thấp hơn
+          if (status === 422 && limit !== limits[limits.length - 1]) continue;
+          break;
+        }
+      }
+      const detail =
+        (lastErr as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      const detailText =
+        typeof detail === "string"
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d: { msg?: string }) => d?.msg).filter(Boolean).join("; ")
+            : null;
+      setAiError(
+        detailText
+          ? `Không tải được report đã lưu: ${detailText}`
+          : "Không tải được report đã lưu."
       );
-      applySavedReport(res.data);
-    } catch {
-      setAiError("Không tải được report đã lưu.");
     } finally {
       setReportDetailLoading(null);
     }
@@ -1234,30 +1260,47 @@ export default function AdminTokenSecurityPage() {
             </div>
           )}
 
-          {/* LockSend AI model info */}
+          {/* LockSend AI model info (collapsed by default) */}
           {aiHealth && aiReady && aiHealth.metrics && (
-            <div className={`${surfaceCard} p-5`}>
-              <div className="flex items-center gap-2 mb-3">
-                <h3 className="text-sm font-semibold text-emerald-300">LockSend AI — Random Forest</h3>
-                <span className="text-xs text-slate-500 dark:text-white/30">{aiHealth.version}</span>
-              </div>
-              <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
-                {[
-                  { label: "Accuracy",  val: aiHealth.metrics.accuracy },
-                  { label: "F1",        val: aiHealth.metrics.f1 },
-                  { label: "ROC-AUC",   val: aiHealth.metrics.roc_auc },
-                  { label: "Precision", val: aiHealth.metrics.precision },
-                  { label: "Recall",    val: aiHealth.metrics.recall },
-                ].map(({ label, val }) => (
-                  <div key={label} className="text-center">
-                    <p className="text-sm font-bold text-emerald-300">{val != null ? (val * 100).toFixed(1) + "%" : "—"}</p>
-                    <p className="text-[10px] text-slate-500 dark:text-white/30 mt-0.5">{label}</p>
+            <div className={surfaceCard}>
+              <button
+                type="button"
+                onClick={() => setModelInfoOpen((o) => !o)}
+                className="w-full px-4 py-2.5 flex items-center gap-2 text-left hover:bg-white/[0.02] transition rounded-[inherit]"
+                aria-expanded={modelInfoOpen}
+              >
+                <span className="text-xs font-semibold text-emerald-300">Model info</span>
+                <span className="text-[11px] text-slate-500 dark:text-white/35 truncate">
+                  Random Forest · {aiHealth.version}
+                  {aiHealth.metrics.roc_auc != null
+                    ? ` · ROC-AUC ${(aiHealth.metrics.roc_auc * 100).toFixed(1)}%`
+                    : ""}
+                </span>
+                <span className="ml-auto text-slate-500 dark:text-white/30 text-xs shrink-0">
+                  {modelInfoOpen ? "▾" : "▸"}
+                </span>
+              </button>
+              {modelInfoOpen && (
+                <div className={`px-4 pb-4 pt-1 border-t ${admin.divider}`}>
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
+                    {[
+                      { label: "Accuracy",  val: aiHealth.metrics.accuracy },
+                      { label: "F1",        val: aiHealth.metrics.f1 },
+                      { label: "ROC-AUC",   val: aiHealth.metrics.roc_auc },
+                      { label: "Precision", val: aiHealth.metrics.precision },
+                      { label: "Recall",    val: aiHealth.metrics.recall },
+                    ].map(({ label, val }) => (
+                      <div key={label} className="text-center">
+                        <p className="text-sm font-bold text-emerald-300">{val != null ? (val * 100).toFixed(1) + "%" : "—"}</p>
+                        <p className="text-[10px] text-slate-500 dark:text-white/30 mt-0.5">{label}</p>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-              <p className="text-[10px] text-slate-400 dark:text-white/20 mt-3">
-                Train: {aiHealth.metrics.train_size?.toLocaleString()} samples · Dataset: CIC-IDS2017 (brute-force, DoS, Bot, DDoS)
-              </p>
+                  <p className="text-[10px] text-slate-400 dark:text-white/20 mt-3">
+                    Train: {aiHealth.metrics.train_size?.toLocaleString()} samples · Dataset: CIC-IDS2017 (brute-force, DoS, Bot, DDoS)
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -1348,15 +1391,26 @@ export default function AdminTokenSecurityPage() {
               </div>
             )}
 
-            <button
-              type="button"
-              onClick={() => void runAiAnalyze()}
-              disabled={analyzing || !aiReady}
-              className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 disabled:bg-white/10 text-sm font-medium text-white transition disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {analyzing ? <LoadingSpinner size="sm" /> : null}
-              {analyzing ? t("admin.tokenSecurity.analyzing") : t("admin.tokenSecurity.runAi")}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void runAiAnalyze(false)}
+                disabled={analyzing || !aiReady}
+                className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 disabled:bg-white/10 text-sm font-medium text-white transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {analyzing ? <LoadingSpinner size="sm" /> : null}
+                {analyzing ? t("admin.tokenSecurity.analyzing") : t("admin.tokenSecurity.runAi")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void runAiAnalyze(true)}
+                disabled={analyzing || !aiReady}
+                title="Phân tích lại toàn bộ token, bỏ qua bộ lọc benign đã lưu"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 text-sm font-medium transition disabled:cursor-not-allowed"
+              >
+                Force re-analyze
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1785,7 +1839,7 @@ export default function AdminTokenSecurityPage() {
               <p className="text-slate-600 dark:text-white/35 text-sm mb-4">
                 {t("admin.tokenSecurity.noAiReport")}
               </p>
-              <button type="button" onClick={() => void runAiAnalyze()} disabled={analyzing || !aiReady}
+              <button type="button" onClick={() => void runAiAnalyze(false)} disabled={analyzing || !aiReady}
                 className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-sm text-white transition disabled:opacity-50">
                 {analyzing ? <LoadingSpinner size="sm" /> : null}
                 {aiReady ? t("admin.tokenSecurity.runAi") : t("admin.tokenSecurity.modelNotReadyBtn")}
@@ -1820,7 +1874,12 @@ export default function AdminTokenSecurityPage() {
                 )}
               </div>
               <p className="text-sm text-slate-300">
-                Lần phân tích này không tạo snapshot AI mới.
+                Lần phân tích này không tạo snapshot AI mới
+                {(selectedReportMeta.result_summary?.skipped_benign ??
+                  selectedReportMeta.result_summary?.skipped_recent ??
+                  selectedReportMeta.skipped_cached) > 0
+                  ? " — hầu hết token đã được đánh dấu benign ở lần chạy trước nên bị bỏ qua."
+                  : "."}
               </p>
               <p className="mt-2 text-xs text-slate-500 dark:text-white/35">
                 Analyzed: {selectedReportMeta.result_summary?.ai_analyzed ?? selectedReportMeta.analyzed_count}
@@ -1829,6 +1888,14 @@ export default function AdminTokenSecurityPage() {
                 <span className="mx-2">·</span>
                 Saved snapshots: {selectedReportMeta.result_summary?.saved_snapshots ?? 0}
               </p>
+              <button
+                type="button"
+                onClick={() => void runAiAnalyze(true)}
+                disabled={analyzing || !aiReady}
+                className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 text-sm font-medium transition"
+              >
+                Force re-analyze (không skip)
+              </button>
             </div>
           )}
 

@@ -2,7 +2,7 @@
 
 **IAP491 — Information Security** · Hệ thống chia sẻ file mã hóa end-to-end
 
-**Tài liệu đầy đủ để tái hiện / clone dự án:** [DOCUMENTATION_VI.md](./DOCUMENTATION_VI.md) (kiến trúc thực tế, API, DB, crypto, env, gap FE/BE).
+**Tài liệu đầy đủ để tái hiện / clone dự án:** [docs/DOCUMENTATION_VI.md](./docs/DOCUMENTATION_VI.md) (kiến trúc thực tế, API, DB, crypto, env, gap FE/BE).
 
 Hệ thống lưu trữ và chia sẻ file an toàn trên Azure Blob Storage sử dụng mã hóa hybrid:
 **X25519 + HKDF + AES-256-GCM + Ed25519**
@@ -11,9 +11,11 @@ Hệ thống lưu trữ và chia sẻ file an toàn trên Azure Blob Storage s�
 
 ```
 secure-file-sharing/
-├── backend/        # FastAPI + Azure SDK + PostgreSQL
+├── backend/        # FastAPI + Azure SDK + PostgreSQL (canonical API)
 ├── frontend/       # React 19 + Vite 8 + TypeScript + Tailwind v4
 ├── locksend-ai/    # ML token security (Random Forest + optional HTTP service)
+├── docs/           # Tài liệu đồ án, API, security, flow
+├── start.sh        # Helper → backend/start.sh (Railway Root Directory = backend)
 └── README.md
 ```
 
@@ -190,4 +192,4 @@ Migration: `f1a2b3c4d5e6_add_encrypted_key_blob.py` → cột `user_public_keys.
 4. Backend lưu ciphertext lên Azure Blob, trả SAS URL.
 5. Recipient tải ciphertext qua SAS → verify chữ ký → giải mã trong browser → so sánh SHA-256 plaintext.
 
-Chi tiết API, schema DB, gap FE/BE: [DOCUMENTATION_VI.md](./DOCUMENTATION_VI.md).
+Chi tiết API, schema DB, gap FE/BE: [docs/DOCUMENTATION_VI.md](./docs/DOCUMENTATION_VI.md).

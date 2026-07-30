@@ -2,6 +2,9 @@
 .DS_Store
 Thumbs.db
 
+# Accidental root installs
+node_modules/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
@@ -32,4 +35,3 @@ locksend-ai/data/*.csv
 locksend-ai/venv/
 locksend-ai/.venv/
 locksend-ai/models/model.pkl
-

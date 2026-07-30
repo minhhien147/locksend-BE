@@ -258,8 +258,9 @@ Module AI dùng cho trang **Admin Token Security**, không ảnh hưởng tới 
 LockSend không chỉ là một demo mã hóa file đơn lẻ, mà là một hệ thống chia sẻ file an toàn có kiến trúc khá đầy đủ: từ **mã hóa phía client**, **quản lý khóa zero-knowledge**, **chia sẻ và thu hồi quyền**, đến **xác thực tài khoản** và **giám sát rủi ro token ở mức vận hành**. Điều này giúp đồ án vừa có giá trị học thuật về an toàn thông tin, vừa có định hướng triển khai gần với hệ thống thực tế.
 
 ## 14) Tài liệu liên quan trong repo
-- `README.md`: tổng quan kiến trúc, stack, cách chạy local
+- `../README.md`: tổng quan kiến trúc, stack, cách chạy local
 - `DOCUMENTATION_VI.md`: tài liệu chi tiết để tái hiện dự án
 - `HUONG_DAN_CHUC_NANG_VA_FLOW_WEB.md`: mô tả flow chức năng theo code hiện tại
-- `backend/db/schema.sql` và `backend/db/README.md`: thiết kế CSDL
+- `LUONG_HOAT_DONG.md`, `OWASP_SECURITY_REPORT.md`, `SECURITY_AUDIT_2026-07-29.md`
+- `../backend/db/schema.sql` và `../backend/db/README.md`: thiết kế CSDL
 

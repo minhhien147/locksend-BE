@@ -1,6 +1,6 @@
 # Hướng Dẫn Chức Năng Và Flow Hoạt Động Web
 
-Tài liệu mô tả **luồng thực tế theo code hiện tại** của LockSend / Secure File Sharing. Chi tiết API, schema DB và stack: [DOCUMENTATION_VI.md](./DOCUMENTATION_VI.md), [README.md](./README.md).
+Tài liệu mô tả **luồng thực tế theo code hiện tại** của LockSend / Secure File Sharing. Chi tiết API, schema DB và stack: [DOCUMENTATION_VI.md](./DOCUMENTATION_VI.md), [README.md](../README.md).
 
 ---
 

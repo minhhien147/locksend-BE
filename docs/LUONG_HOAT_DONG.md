@@ -8,7 +8,7 @@ Tài liệu mô tả **luồng thực tế theo code hiện tại** của monore
 
 | File | Mục đích |
 |------|----------|
-| [README.md](./README.md) | Tổng quan, chạy local, nguyên tắc bảo mật |
+| [README.md](../README.md) | Tổng quan, chạy local, nguyên tắc bảo mật |
 | [DOCUMENTATION_VI.md](./DOCUMENTATION_VI.md) | API chi tiết, schema DB, env, gap FE/BE |
 | [HUONG_DAN_CHUC_NANG_VA_FLOW_WEB.md](./HUONG_DAN_CHUC_NANG_VA_FLOW_WEB.md) | Hướng dẫn chức năng từng trang web |
 
@@ -525,7 +525,7 @@ npm install
 npm run dev   # cần VITE_API_URL → http://localhost:8000
 ```
 
-Chi tiết: [README.md](./README.md).
+Chi tiết: [README.md](../README.md).
 
 ---
 

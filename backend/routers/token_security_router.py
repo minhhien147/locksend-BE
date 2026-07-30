@@ -944,9 +944,22 @@ async def ai_get_job_detail(
                 continue
             seen_refs.add(s.token_ref)
             deduped_snaps.append(s)
-        jwt_by_user, sas_by_token = (
-            await _build_metric_lookups(db) if deduped_snaps else ({}, {})
-        )
+
+        jwt_by_user: dict[str, dict[str, Any]] = {}
+        sas_by_token: dict[str, dict[str, Any]] = {}
+        if deduped_snaps:
+            try:
+                jwt_by_user, sas_by_token = await _build_metric_lookups(db)
+            except Exception as enrich_err:
+                # Enrichment thất bại (timeout/RAM trên production) — vẫn trả snapshot thô
+                # để FE không mất cả report.
+                logger.warning(
+                    "job %s snapshot enrichment failed, returning raw snapshots: %s",
+                    job_id,
+                    enrich_err,
+                )
+                payload["enrichment_degraded"] = True
+
         payload["snapshots"] = [
             _serialize_snapshot(
                 s,
