@@ -12,6 +12,11 @@
  */
 
 import { x25519, ed25519 } from "@noble/curves/ed25519.js";
+import {
+  writeChunk,
+  isFileSystemInvalidStateError,
+  recreateWritableAt,
+} from "./fileSave";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -798,12 +803,16 @@ export async function prepareChunkedDecryption(
 
 /**
  * Giải mã chunked từng phần — peak RAM ≈ 2 × chunkSize (không ghép toàn bộ file).
+ * Ghi qua File System Access API; tự recover khi Chrome invalidate writable stream.
  */
 export async function decryptChunkedToWritable(
   metadata: ChunkedEncryptionMetadata,
   recipientX25519PrivateKey: Uint8Array,
   getEncryptedChunk: (chunkIndex: number) => Promise<Uint8Array>,
-  writable: FileSystemWritableFileStream,
+  session: {
+    handle: FileSystemFileHandle;
+    writable: FileSystemWritableFileStream;
+  },
   onProgress?: (done: number, total: number) => void
 ): Promise<number> {
   const { aesKey, baseNonce } = await prepareChunkedDecryption(
@@ -821,9 +830,37 @@ export async function decryptChunkedToWritable(
         throw new Error(`Chunk ${i}: SHA-256 không khớp.`);
       }
     }
-    await writable.write(new Uint8Array(plaintextChunk));
-    totalWritten += plaintextChunk.byteLength;
+
+    // Copy sở hữu riêng trước khi ghi; bỏ ref ciphertext để GC kịp reclaim.
+    const payload = plaintextChunk.slice();
+    let wrote = false;
+    for (let attempt = 0; attempt < 3 && !wrote; attempt++) {
+      try {
+        await writeChunk(session.writable, payload);
+        wrote = true;
+      } catch (err) {
+        if (!isFileSystemInvalidStateError(err) || attempt === 2) {
+          if (isFileSystemInvalidStateError(err)) {
+            throw new Error(
+              "Trình duyệt mất kết nối tới file đang lưu (file lớn / thiếu dung lượng đĩa). " +
+                "Đóng DevTools nếu đang mở, kiểm tra dung lượng trống, rồi tải lại."
+            );
+          }
+          throw err;
+        }
+        try {
+          await session.writable.abort();
+        } catch {
+          /* ignore */
+        }
+        session.writable = await recreateWritableAt(session.handle, totalWritten);
+      }
+    }
+
+    totalWritten += payload.byteLength;
     onProgress?.(i + 1, metadata.chunkCount);
+    // Nhường event loop + giúp GC reclaim buffer chunk trước đó.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
   if (totalWritten !== metadata.fileSize) {

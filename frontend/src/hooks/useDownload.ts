@@ -181,10 +181,10 @@ export function useDownload(): UseDownloadReturn {
       bytesTotal: metadata.fileSize,
     });
 
-    let writable: FileSystemWritableFileStream | null = null;
+    let session: Awaited<ReturnType<typeof pickSaveFile>> | null = null;
     try {
       if (signal.aborted) throw new Error("CANCELLED");
-      writable = await pickSaveFile(metadata.fileName);
+      session = await pickSaveFile(metadata.fileName);
       const fileSizeBytes = await decryptChunkedToWritable(
         metadata,
         myKeys.x25519.privateKey,
@@ -195,7 +195,7 @@ export function useDownload(): UseDownloadReturn {
             logSasUrl.startsWith("https://") ? logSasUrl : undefined,
             signal
           ),
-        writable,
+        session,
         (done, total) =>
           setState((prev) => ({
             ...prev,
@@ -206,17 +206,17 @@ export function useDownload(): UseDownloadReturn {
             ),
           }))
       );
-      await closeSaveFile(writable);
-      writable = null;
+      await closeSaveFile(session.writable);
+      session = null;
       await finishDownload(metadata, fileSizeBytes, logSasUrl, fileId);
     } catch (e) {
       if (isAbortError(e) || (e as Error)?.message === "CANCELLED") {
         cancel();
         throw new Error("CANCELLED");
       }
-      if (writable) {
+      if (session?.writable) {
         try {
-          await writable.abort();
+          await session.writable.abort();
         } catch {
           /* ignore */
         }
