@@ -146,6 +146,60 @@ async def build_file_overview(db: AsyncSession, *, days: int = 7, limit: int = 2
 
     suspicious_count = sum(1 for f in top_files if f["suspicious"] or f["ai_alerts"] > 0)
 
+    # Top files by upload count
+    up_agg = (
+        await db.execute(
+            select(
+                UploadLog.file_id,
+                UploadLog.original_filename,
+                func.count(UploadLog.id).label("uploads"),
+                func.count(func.distinct(UploadLog.ip_address)).label("unique_ips"),
+                func.count(func.distinct(UploadLog.user_id)).label("unique_users"),
+                func.coalesce(func.sum(UploadLog.file_size_bytes), 0).label("total_bytes"),
+            )
+            .where(UploadLog.created_at >= since, UploadLog.file_id.isnot(None))
+            .group_by(UploadLog.file_id, UploadLog.original_filename)
+            .order_by(func.count(UploadLog.id).desc())
+            .limit(limit)
+        )
+    ).all()
+
+    up_file_ids = [row.file_id for row in up_agg if row.file_id]
+    up_owners: dict[str, dict[str, Any]] = {}
+    if up_file_ids:
+        up_files = (
+            await db.execute(
+                select(File)
+                .where(File.id.in_(up_file_ids))
+                .options(selectinload(File.owner))
+            )
+        ).scalars().all()
+        for f in up_files:
+            owner_email = f.owner.email if f.owner else None
+            up_owners[f.id] = {
+                "owner_id": f.owner_id,
+                "owner_email": owner_email,
+                "owner_email_valid": is_valid_alert_email(owner_email),
+                "storage_mode": f.storage_mode,
+            }
+
+    top_upload_files: list[dict[str, Any]] = []
+    for row in up_agg:
+        fid = row.file_id
+        owner = up_owners.get(fid or "", {})
+        top_upload_files.append({
+            "file_id": fid,
+            "file_name": row.original_filename,
+            "uploads": int(row.uploads),
+            "unique_ips": int(row.unique_ips or 0),
+            "unique_users": int(row.unique_users or 0),
+            "total_bytes": int(row.total_bytes or 0),
+            "owner_email": owner.get("owner_email"),
+            "owner_email_valid": owner.get("owner_email_valid", False),
+            "owner_id": owner.get("owner_id"),
+            "storage_mode": owner.get("storage_mode"),
+        })
+
     top_file_trends: list[dict[str, Any]] = []
     for f in top_files[:5]:
         fid = f.get("file_id")
@@ -165,6 +219,25 @@ async def build_file_overview(db: AsyncSession, *, days: int = 7, limit: int = 2
             "downloads_per_day": _bucket_by_day(day_labels, list(file_dl_ts)),
         })
 
+    top_upload_file_trends: list[dict[str, Any]] = []
+    for f in top_upload_files[:5]:
+        fid = f.get("file_id")
+        if not fid:
+            continue
+        file_up_ts = (
+            await db.execute(
+                select(UploadLog.created_at).where(
+                    UploadLog.file_id == fid,
+                    UploadLog.created_at >= since,
+                )
+            )
+        ).scalars().all()
+        top_upload_file_trends.append({
+            "file_id": fid,
+            "file_name": f["file_name"],
+            "uploads_per_day": _bucket_by_day(day_labels, list(file_up_ts)),
+        })
+
     return {
         "days": days,
         "labels": day_labels,
@@ -172,6 +245,7 @@ async def build_file_overview(db: AsyncSession, *, days: int = 7, limit: int = 2
             "uploads": len(upload_ts),
             "downloads": len(download_ts),
             "unique_files_downloaded": len(dl_agg),
+            "unique_files_uploaded": len(up_agg),
             "suspicious_files": suspicious_count,
         },
         "trend": {
@@ -179,7 +253,9 @@ async def build_file_overview(db: AsyncSession, *, days: int = 7, limit: int = 2
             "downloads_per_day": _bucket_by_day(day_labels, list(download_ts)),
         },
         "top_file_trends": top_file_trends,
+        "top_upload_file_trends": top_upload_file_trends,
         "top_files": top_files,
+        "top_upload_files": top_upload_files,
     }
 
 
@@ -259,6 +335,16 @@ async def get_file_detail(db: AsyncSession, file_id: str, *, days: int = 7) -> d
                 "created_at": d.created_at.isoformat(),
             }
             for d in downloads[:15]
+        ],
+        "recent_uploads": [
+            {
+                "user_id": u.user_id,
+                "ip_address": u.ip_address,
+                "upload_type": u.upload_type,
+                "file_size_bytes": u.file_size_bytes,
+                "created_at": u.created_at.isoformat(),
+            }
+            for u in uploads[:15]
         ],
         "recent_alerts": [
             {

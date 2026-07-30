@@ -1,46 +1,128 @@
-"""Tài liệu rút gọn inject vào Gemini system prompt — không fine-tune model."""
+"""
+Knowledge cho LockSend Assistant (Gemini).
 
-LOCKSEND_ASSISTANT_KNOWLEDGE = """
-# LockSend — kiến thức trợ lý (zero-knowledge E2E file sharing)
+Cách cập nhật tối ưu khi có tính năng mới:
+  1. Sửa `backend/data/assistant/KNOWLEDGE.md` (kiến thức ổn định)
+  2. Thêm bullet mới lên đầu `backend/data/assistant/CHANGELOG.md`
+  3. Redeploy BE (production) — local: sửa file là đủ, loader hot-reload theo mtime
 
-## Bảo mật cốt lõi
-- Mã hóa/giải mã file 100% trên trình duyệt (client-side). Server/Azure chỉ lưu ciphertext.
-- Private key plaintext chỉ trong RAM; passphrase bọc encrypted_key_blob trên server.
-- Upload: X25519 key exchange + AES-256-GCM + Ed25519 ký metadata/ciphertext.
-- Mỗi file dùng ephemeral key (forward secrecy per file).
+Không fine-tune Gemini; chỉ inject system prompt.
+"""
 
-## Keypair
-- User cần tạo keypair lần đầu tại trang Keys + passphrase.
-- Đăng nhập ≠ mở khóa key: sau login vẫn cần passphrase (hoặc session wrapper cùng tab sau F5).
-- Reset/tạo keypair mới: file đã mã hóa cho public key CŨ không giải mã được bằng key MỚI.
-- Người gửi reset keypair: người nhận VẪN giải mã được (metadata lưu chữ ký & ephemeral key lúc gửi).
-- Người nhận reset keypair: KHÔNG giải mã được file cũ (trừ khi còn backup private key cũ).
-- Lộ private key: attacker có thể giải mã mọi file đã bọc cho key đó; rotate keypair bảo vệ file tương lai.
+from __future__ import annotations
 
-## Upload / Download
-- File >= 64MB: chunked encryption (mặc định 4MB/chunk) + multipart; browser Prefer Put Block thẳng Azure.
-- Download file lớn: tải/giải mã từng chunk, lưu ra đĩa — nên dùng Chrome hoặc Edge.
-- File < 64MB: single-shot; giới hạn RAM trình duyệt (~512MB–1GB tùy máy).
-- Gửi file: chọn recipient có public key hoặc dán public key X25519; nhận SAS link chia sẻ.
-- Recipient: mở khóa key đúng keypair → Download dán SAS hoặc Hộp nhận trong Hồ sơ.
+import logging
+import os
+from pathlib import Path
 
-## Chia sẻ & revoke
-- Owner có thể revoke recipient trên file đã upload (không cần mã hóa lại blob).
-- Revoke không xóa ciphertext trên Azure; nếu attacker đã tải blob + có key vẫn giải mã offline.
-
-## AI & tích hợp
-- LockSend AI (Random Forest, CIC-IDS2017): admin Token Security — phân tích JWT/SAS bất thường.
-- VirusTotal (nếu bật): sau giải mã client gửi SHA-256 plaintext lên server tra hash — không gửi file.
-- Trợ lý Gemini: chỉ hướng dẫn LockSend; không yêu cầu passphrase/private key.
-
-## Quy tắc trả lời
-- Trả lời ngắn gọn tiếng Việt, đúng thông tin trên.
-- Không bịa tính năng. Không hướng dẫn tắt bảo mật.
-- Nếu không chắc: nói user xem trang Keys / liên hệ admin.
-""".strip()
+logger = logging.getLogger(__name__)
 
 LOCKSEND_ASSISTANT_RULES = """
-Bạn là trợ lý LockSend. Chỉ trả lời về ứng dụng LockSend (mã hóa file, keypair, upload/download, SAS, vault, bảo mật token).
+Bạn là trợ lý LockSend. Chỉ trả lời về ứng dụng LockSend (mã hóa file, keypair, upload/download, SAS, vault, admin, bảo mật token).
 Tuyệt đối KHÔNG yêu cầu passphrase, private key, hoặc nội dung file.
 Không đưa lời khuyên phá vỡ zero-knowledge (ví dụ upload plaintext lên server).
+Ưu tiên thông tin trong mục CHANGELOG (tính năng mới) nếu mâu thuẫn với phần kiến thức cũ.
 """.strip()
+
+_FALLBACK_KNOWLEDGE = """
+# LockSend — kiến thức trợ lý (fallback)
+- Mã hóa/giải mã phía trình duyệt; server chỉ lưu ciphertext.
+- Keypair + passphrase tại trang Keys; đăng nhập ≠ mở khóa crypto.
+- File lớn dùng chunked upload/download (Chrome/Edge).
+- Admin: Users, Nhật ký activity, Token Security (rule + LockSend AI).
+""".strip()
+
+_cache_key: tuple[tuple[str, float], ...] | None = None
+_cache_text: str = ""
+
+
+def _assistant_dirs() -> list[Path]:
+    """Thứ tự tìm thư mục knowledge (BE deploy + monorepo local)."""
+    dirs: list[Path] = []
+    env = (os.getenv("ASSISTANT_KNOWLEDGE_DIR") or "").strip()
+    if env:
+        dirs.append(Path(env))
+    here = Path(__file__).resolve().parent
+    # backend/data/assistant (canonical khi Railway Root Directory = backend)
+    dirs.append(here.parent / "data" / "assistant")
+    # monorepo docs/assistant (dev convenience)
+    dirs.append(here.parent.parent / "docs" / "assistant")
+    # unique preserve order
+    seen: set[str] = set()
+    out: list[Path] = []
+    for d in dirs:
+        key = str(d.resolve()) if d.exists() else str(d)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
+
+
+def _read_file(path: Path) -> str | None:
+    try:
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning("Không đọc được %s: %s", path, exc)
+    return None
+
+
+def _load_from_disk() -> tuple[str, tuple[tuple[str, float], ...]]:
+    knowledge = ""
+    changelog = ""
+    mtimes: list[tuple[str, float]] = []
+
+    for d in _assistant_dirs():
+        k_path = d / "KNOWLEDGE.md"
+        c_path = d / "CHANGELOG.md"
+        if not knowledge:
+            text = _read_file(k_path)
+            if text:
+                knowledge = text
+                try:
+                    mtimes.append((str(k_path), k_path.stat().st_mtime))
+                except OSError:
+                    pass
+        if not changelog:
+            text = _read_file(c_path)
+            if text:
+                changelog = text
+                try:
+                    mtimes.append((str(c_path), c_path.stat().st_mtime))
+                except OSError:
+                    pass
+        if knowledge and changelog:
+            break
+
+    if not knowledge:
+        knowledge = _FALLBACK_KNOWLEDGE
+        logger.warning(
+            "Assistant knowledge MD không tìm thấy — dùng fallback. "
+            "Đặt file tại backend/data/assistant/KNOWLEDGE.md"
+        )
+
+    parts = [knowledge]
+    if changelog:
+        parts.append(changelog)
+    return "\n\n---\n\n".join(parts), tuple(mtimes)
+
+
+def get_assistant_knowledge(*, force_reload: bool = False) -> str:
+    """Knowledge + changelog, cache theo mtime file."""
+    global _cache_key, _cache_text
+
+    text, key = _load_from_disk()
+    if force_reload or key != _cache_key:
+        _cache_key = key
+        _cache_text = text
+        logger.debug("Assistant knowledge loaded (%d chars, %d files)", len(text), len(key))
+    return _cache_text
+
+
+def get_system_instruction() -> str:
+    return f"{LOCKSEND_ASSISTANT_RULES}\n\n---\n\n{get_assistant_knowledge()}"
+
+
+# Tương thích import cũ
+LOCKSEND_ASSISTANT_KNOWLEDGE = _FALLBACK_KNOWLEDGE

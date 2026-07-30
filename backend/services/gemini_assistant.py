@@ -9,10 +9,7 @@ from typing import Any
 
 import httpx
 
-from services.assistant_knowledge import (
-    LOCKSEND_ASSISTANT_KNOWLEDGE,
-    LOCKSEND_ASSISTANT_RULES,
-)
+from services.assistant_knowledge import get_system_instruction
 from services.ssrf_guard import validate_gemini_base
 
 logger = logging.getLogger(__name__)
@@ -56,7 +53,7 @@ def is_configured() -> bool:
 
 
 def _system_instruction() -> str:
-    return f"{LOCKSEND_ASSISTANT_RULES}\n\n---\n\n{LOCKSEND_ASSISTANT_KNOWLEDGE}"
+    return get_system_instruction()
 
 
 def _build_contents(history: list[dict[str, str]], message: str) -> list[dict[str, Any]]:

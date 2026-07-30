@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import api from "../utils/api";
 import { useDraftState } from "../hooks/useDraftState";
 
@@ -224,6 +224,9 @@ interface AiAnalysisJob {
   started_at?: string | null;
   completed_at?: string | null;
   snapshots?: AiSnapshotRow[];
+  snapshots_total?: number;
+  snapshots_total_available?: number;
+  snapshots_truncated?: boolean;
 }
 
 interface AiSnapshotRow {
@@ -298,6 +301,19 @@ interface TopFileRow {
   storage_mode?: string | null;
 }
 
+interface TopUploadFileRow {
+  file_id: string | null;
+  file_name: string;
+  uploads: number;
+  unique_ips: number;
+  unique_users: number;
+  total_bytes: number;
+  owner_email?: string | null;
+  owner_email_valid?: boolean;
+  owner_id?: string | null;
+  storage_mode?: string | null;
+}
+
 interface FileActivityData {
   days: number;
   labels: string[];
@@ -305,6 +321,7 @@ interface FileActivityData {
     uploads: number;
     downloads: number;
     unique_files_downloaded: number;
+    unique_files_uploaded?: number;
     suspicious_files: number;
   };
   trend: {
@@ -312,7 +329,9 @@ interface FileActivityData {
     downloads_per_day: number[];
   };
   top_file_trends: { file_id: string; file_name: string; downloads_per_day: number[] }[];
+  top_upload_file_trends?: { file_id: string; file_name: string; uploads_per_day: number[] }[];
   top_files: TopFileRow[];
+  top_upload_files?: TopUploadFileRow[];
 }
 
 interface FileDetailData {
@@ -332,6 +351,13 @@ interface FileDetailData {
     suspicious: boolean;
   };
   recent_downloads: { user_id?: string | null; ip_address?: string | null; created_at: string }[];
+  recent_uploads?: {
+    user_id?: string | null;
+    ip_address?: string | null;
+    upload_type?: string;
+    file_size_bytes?: number;
+    created_at: string;
+  }[];
   recent_alerts: { id: string; ai_score_pct: number; decision: string; summary_vi?: string; created_at: string }[];
 }
 
@@ -447,6 +473,11 @@ export default function AdminTokenSecurityPage() {
   const [fileDetailLoading, setFileDetailLoading] = useState(false);
   const [notifyOwnerBusy, setNotifyOwnerBusy] = useState(false);
   const [modelInfoOpen, setModelInfoOpen] = useState(false);
+  const [aiFilterType, setAiFilterType] = useState<"all" | "jwt" | "sas">("all");
+  const [aiFilterDecision, setAiFilterDecision] = useState<
+    "all" | "ALLOW" | "MONITOR" | "REVIEW" | "REVOKE" | "needs_review" | "disagree"
+  >("all");
+  const [aiFilterQuery, setAiFilterQuery] = useState("");
 
   const flash = (type: "ok" | "err", msg: string) => {
     setFeedback({ type, msg });
@@ -457,10 +488,29 @@ export default function AdminTokenSecurityPage() {
 
   const loadTopRisk = useCallback(async () => {
     try {
-      const res = await api.get<{ top_risk_tokens: TokenMetric[] }>(
-        "/auth/admin/token-security/overview/top-risk"
-      );
-      setOverview((prev) => prev ? { ...prev, top_risk_tokens: res.data.top_risk_tokens ?? [] } : prev);
+      const res = await api.get<{
+        top_risk_tokens: TokenMetric[];
+        high_risk_tokens?: number;
+        critical_tokens?: number;
+        auto_revoke_candidates?: number;
+      }>("/auth/admin/token-security/overview/top-risk");
+      setOverview((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          top_risk_tokens: res.data.top_risk_tokens ?? [],
+          risk_summary: {
+            ...prev.risk_summary,
+            high_risk_tokens:
+              res.data.high_risk_tokens ?? prev.risk_summary.high_risk_tokens,
+            critical_tokens:
+              res.data.critical_tokens ?? prev.risk_summary.critical_tokens,
+            auto_revoke_candidates:
+              res.data.auto_revoke_candidates ??
+              prev.risk_summary.auto_revoke_candidates,
+          },
+        };
+      });
     } catch {
       /* optional — top risk là optional feature */
     }
@@ -562,19 +612,34 @@ export default function AdminTokenSecurityPage() {
   }, []);
 
   const applySavedReport = useCallback((job: AiAnalysisJob) => {
-    const snapshots = job.snapshots ?? [];
+    const decisionRank = (d?: string) => {
+      const x = (d ?? "").toUpperCase();
+      if (x === "REVOKE") return 0;
+      if (x === "REVIEW") return 1;
+      if (x === "MONITOR") return 2;
+      return 3;
+    };
+    const snapshots = [...(job.snapshots ?? [])].sort((a, b) => {
+      const rd = decisionRank(a.decision) - decisionRank(b.decision);
+      if (rd !== 0) return rd;
+      return (b.ai_score_pct ?? 0) - (a.ai_score_pct ?? 0);
+    });
     setSelectedReportJobId(job.job_id);
     setSelectedReportMeta(job);
     setAiRuleMetrics([]);
     setAiResults(snapshots.map(mapSnapshotToAiResult));
     setAiError(null);
+    // Ưu tiên hiện Needs Review khi report bị cắt limit
+    if (job.snapshots_truncated) {
+      setAiFilterDecision("needs_review");
+    }
   }, []);
 
   const loadSavedReport = useCallback(async (jobId: string) => {
     setReportDetailLoading(jobId);
     try {
-      // Production cũ có le=500; bản mới le=5000. Dùng 500 rồi fallback nếu cần.
-      const limits = [500, 200];
+      // Ưu tiên tải tối đa (BE le=5000); fallback nếu BE cũ.
+      const limits = [5000, 2000, 500, 200];
       let lastErr: unknown = null;
       for (const limit of limits) {
         try {
@@ -781,20 +846,85 @@ export default function AdminTokenSecurityPage() {
 
   // ── AI analysis ─────────────────────────────────────────────────────────────
 
+  const aiRuleByTokenId = useMemo(() => {
+    const map = new Map<string, TokenMetric>();
+    for (const m of aiRuleMetrics) {
+      if (m.token_id) map.set(m.token_id, m);
+    }
+    return map;
+  }, [aiRuleMetrics]);
+
+  const filteredAiResults = useMemo(() => {
+    const q = aiFilterQuery.trim().toLowerCase();
+    return aiResults.filter((r) => {
+      const type = (r.token_type ?? "jwt").toLowerCase();
+      if (aiFilterType !== "all" && type !== aiFilterType) return false;
+
+      const decision = (r.decision ?? "").toUpperCase();
+      if (aiFilterDecision === "needs_review") {
+        if (decision !== "REVIEW" && decision !== "REVOKE") return false;
+      } else if (aiFilterDecision === "disagree") {
+        if (r.agreement?.status !== "disagree") return false;
+      } else if (aiFilterDecision !== "all") {
+        if (decision !== aiFilterDecision) return false;
+      }
+
+      if (!q) return true;
+      const haystack = [
+        r.subject_label,
+        r.email,
+        r.blob_name,
+        r.file_id,
+        r.token_id,
+        r.role,
+        r.decision,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [aiResults, aiFilterType, aiFilterDecision, aiFilterQuery]);
+
+  const aiFilterCounts = useMemo(() => {
+    const jwt = aiResults.filter((r) => (r.token_type ?? "jwt") === "jwt").length;
+    const sas = aiResults.filter((r) => r.token_type === "sas").length;
+    const byDecision = {
+      ALLOW: 0,
+      MONITOR: 0,
+      REVIEW: 0,
+      REVOKE: 0,
+    };
+    let disagree = 0;
+    for (const r of aiResults) {
+      const d = (r.decision ?? "").toUpperCase() as keyof typeof byDecision;
+      if (d in byDecision) byDecision[d] += 1;
+      if (r.agreement?.status === "disagree") disagree += 1;
+    }
+    return {
+      jwt,
+      sas,
+      ...byDecision,
+      needs_review: byDecision.REVIEW + byDecision.REVOKE,
+      disagree,
+    };
+  }, [aiResults]);
+
   const exportAiCsv = () => {
-    if (!aiResults.length) return;
+    const rowsSrc = filteredAiResults.length ? filteredAiResults : aiResults;
+    if (!rowsSrc.length) return;
     const header = [
       "token_id", "token_type", "email", "rule_score", "rule_level", "rule_rec",
       "ai_score_pct", "ai_level", "decision", "agreement", "behaviors", "summary_vi",
     ];
-    const rows = aiResults.map((r, i) => {
-      const rule = aiRuleMetrics[i];
+    const rows = rowsSrc.map((r) => {
+      const rule = r.token_id ? aiRuleByTokenId.get(r.token_id) : undefined;
       const esc = (v: string | number | undefined) => {
         const s = String(v ?? "");
         return s.includes(",") || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
       };
       return [
-        r.token_id, r.token_type, rule?.email ?? "",
+        r.token_id, r.token_type, r.email ?? rule?.email ?? "",
         r.rule_score ?? rule?.risk_score, r.rule_level ?? rule?.risk_level, r.rule_recommendation ?? rule?.recommendation,
         r.risk_score_pct, r.ai_level_raw, r.decision,
         r.agreement?.label ?? "", (r.behavior_badges ?? []).map((b) => b.label).join("; "),
@@ -1114,7 +1244,17 @@ export default function AdminTokenSecurityPage() {
       )}
       {!activeJob && aiResults.length > 0 && (
         <div className="text-sm px-4 py-2.5 rounded-xl border text-emerald-300 bg-emerald-500/10 border-emerald-500/20">
-          {t("admin.tokenSecurity.aiAnalyzed", { count: aiResults.length })}
+          {t("admin.tokenSecurity.aiAnalyzed", {
+            count:
+              selectedReportMeta?.result_summary?.ai_analyzed ??
+              selectedReportMeta?.analyzed_count ??
+              aiResults.length,
+          })}
+          {(selectedReportMeta?.result_summary?.ai_analyzed ??
+            selectedReportMeta?.analyzed_count ??
+            0) > aiResults.length
+            ? ` · đang hiện ${aiResults.length} trong danh sách`
+            : ""}
         </div>
       )}
 
@@ -1608,6 +1748,34 @@ export default function AdminTokenSecurityPage() {
                 ))}
               </div>
 
+              {fileActivity.top_upload_file_trends && fileActivity.top_upload_file_trends.length > 0 && (
+                <div className={`${surfaceCard} p-5`}>
+                  <h4 className="text-xs font-semibold text-slate-600 dark:text-white/50 mb-4">
+                    {t("admin.tokenSecurity.topUploadFileTrend")}
+                  </h4>
+                  <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {fileActivity.top_upload_file_trends.map((f) => (
+                      <div key={`up-${f.file_id}`} className="rounded-xl border border-slate-200/10 p-3">
+                        <button
+                          type="button"
+                          onClick={() => void loadFileDetail(f.file_id)}
+                          className="text-xs font-medium text-indigo-400 hover:underline truncate block max-w-full mb-2 text-left"
+                          title={f.file_name}
+                        >
+                          {f.file_name}
+                        </button>
+                        <MiniBarChart
+                          labels={fileActivity.labels}
+                          series={f.uploads_per_day}
+                          colorClass="bg-indigo-500/70"
+                          emptyLabel={t("admin.tokenSecurity.noUploadsInDays", { days: fileActivity.days })}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {fileActivity.top_file_trends.length > 0 && (
                 <div className={`${surfaceCard} p-5`}>
                   <h4 className="text-xs font-semibold text-slate-600 dark:text-white/50 mb-4">
@@ -1632,6 +1800,72 @@ export default function AdminTokenSecurityPage() {
                         />
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {(fileActivity.top_upload_files?.length ?? 0) > 0 && (
+                <div className={`${surfaceCard} overflow-hidden`}>
+                  <div className="px-5 py-3 border-b border-slate-200/10 flex items-center justify-between">
+                    <h3 className={admin.sectionTitle}>{t("admin.tokenSecurity.topFilesByUp")}</h3>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-left text-slate-500 dark:text-white/35 border-b border-slate-200/10">
+                          <th className="px-4 py-2 font-medium">File</th>
+                          <th className="px-4 py-2 font-medium">Owner</th>
+                          <th className="px-4 py-2 font-medium text-right">Uploads</th>
+                          <th className="px-4 py-2 font-medium text-right">IP</th>
+                          <th className="px-4 py-2 font-medium text-right">Users</th>
+                          <th className="px-4 py-2 font-medium text-right">Bytes</th>
+                          <th className="px-4 py-2 font-medium"> </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {fileActivity.top_upload_files!.map((f) => (
+                          <tr
+                            key={`up-row-${f.file_id}-${f.file_name}`}
+                            className="border-b border-slate-200/5 hover:bg-slate-500/5"
+                          >
+                            <td className="px-4 py-2.5 max-w-[200px]">
+                              {f.file_id ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void loadFileDetail(f.file_id!)}
+                                  className="text-indigo-400 hover:underline truncate block max-w-full text-left"
+                                  title={f.file_name}
+                                >
+                                  {f.file_name}
+                                </button>
+                              ) : (
+                                <span className="truncate block max-w-full">{f.file_name}</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-2.5 text-slate-400 truncate max-w-[160px]">
+                              {f.owner_email ?? "—"}
+                            </td>
+                            <td className="px-4 py-2.5 text-right font-mono">{f.uploads}</td>
+                            <td className="px-4 py-2.5 text-right font-mono">{f.unique_ips}</td>
+                            <td className="px-4 py-2.5 text-right font-mono">{f.unique_users}</td>
+                            <td className="px-4 py-2.5 text-right font-mono">
+                              {(f.total_bytes / (1024 * 1024)).toFixed(1)} MB
+                            </td>
+                            <td className="px-4 py-2.5">
+                              {f.file_id && (
+                                <button
+                                  type="button"
+                                  onClick={() => void loadFileDetail(f.file_id!)}
+                                  className="text-[10px] text-slate-400 hover:text-white"
+                                >
+                                  Details
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}
@@ -1808,6 +2042,20 @@ export default function AdminTokenSecurityPage() {
                       </ul>
                     </div>
                   )}
+                  {(fileDetail.recent_uploads?.length ?? 0) > 0 && (
+                    <div>
+                      <h4 className="text-xs font-semibold text-slate-600 dark:text-white/50 mb-2">
+                        {t("admin.tokenSecurity.recentUploads")}
+                      </h4>
+                      <ul className="space-y-1 text-[11px] font-mono text-slate-500">
+                        {fileDetail.recent_uploads!.map((u, i) => (
+                          <li key={`up-${i}`}>
+                            {u.created_at.slice(0, 16)} · {u.ip_address ?? "?"} · {u.upload_type ?? "upload"} · user {u.user_id?.slice(0, 8) ?? "?"}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                   {fileDetail.recent_downloads.length > 0 && (
                     <div>
                       <h4 className="text-xs font-semibold text-slate-600 dark:text-white/50 mb-2">
@@ -1911,7 +2159,26 @@ export default function AdminTokenSecurityPage() {
                       Report {selectedReportMeta.job_id.slice(0, 8)}
                     </span>
                   )}
-                  <span className="text-xs text-slate-500 dark:text-white/30">{t("admin.tokenSecurity.tokensAnalyzed", { count: aiResults.length })}</span>
+                  <span className="text-xs text-slate-500 dark:text-white/30">
+                    {t("admin.tokenSecurity.tokensAnalyzed", {
+                      count:
+                        selectedReportMeta?.result_summary?.ai_analyzed ??
+                        selectedReportMeta?.analyzed_count ??
+                        aiResults.length,
+                    })}
+                    {aiResults.length > 0 &&
+                    (selectedReportMeta?.snapshots_total_available ??
+                      selectedReportMeta?.result_summary?.ai_analyzed ??
+                      selectedReportMeta?.analyzed_count ??
+                      0) > aiResults.length
+                      ? ` · đang hiện ${aiResults.length}/${selectedReportMeta?.snapshots_total_available ?? "?"} (ưu tiên REVOKE/REVIEW)`
+                      : ""}
+                  </span>
+                  {selectedReportMeta?.snapshots_truncated && (
+                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-300">
+                      Danh sách bị cắt — token rủi ro cao được ưu tiên hiện trước
+                    </span>
+                  )}
                   {selectedReportMeta?.created_at && (
                     <span className="text-xs text-slate-500 dark:text-white/30">
                       Saved at {new Date(selectedReportMeta.created_at).toLocaleString("vi-VN")}
@@ -1934,28 +2201,135 @@ export default function AdminTokenSecurityPage() {
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-center">
                   {[
-                    { label: t("admin.tokenSecurity.monitor"), value: aiResults.filter(r => r.decision === "MONITOR").length, color: "text-amber-300" },
-                      { label: "Needs Review", value: aiResults.filter(r => r.decision === "REVIEW" || r.decision === "REVOKE").length, color: "text-rose-300" },
-                    { label: t("admin.tokenSecurity.ruleDisagree"), value: aiResults.filter(r => r.agreement?.status === "disagree").length, color: "text-orange-300" },
-                  ].map(({ label, value, color }) => (
-                    <div key={label}>
+                    {
+                      key: "MONITOR" as const,
+                      label: t("admin.tokenSecurity.monitor"),
+                      value: aiFilterCounts.MONITOR,
+                      color: "text-amber-300",
+                    },
+                    {
+                      key: "needs_review" as const,
+                      label: "Needs Review",
+                      value: aiFilterCounts.needs_review,
+                      color: "text-rose-300",
+                    },
+                    {
+                      key: "disagree" as const,
+                      label: t("admin.tokenSecurity.ruleDisagree"),
+                      value: aiFilterCounts.disagree,
+                      color: "text-orange-300",
+                    },
+                  ].map(({ key, label, value, color }) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() =>
+                        setAiFilterDecision((prev) => (prev === key ? "all" : key))
+                      }
+                      className={`rounded-xl px-2 py-2 transition ${
+                        aiFilterDecision === key
+                          ? "bg-white/[0.06] ring-1 ring-white/15"
+                          : "hover:bg-white/[0.03]"
+                      }`}
+                    >
                       <p className={`text-xl font-bold ${color}`}>{value}</p>
                       <p className="text-[11px] text-slate-600 dark:text-white/35 mt-0.5">{label}</p>
-                    </div>
+                    </button>
                   ))}
+                </div>
+              </div>
+
+              {/* Filters */}
+              <div className={`${surfaceCard} p-4 space-y-3`}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] uppercase tracking-wide text-slate-500 dark:text-white/35 mr-1">
+                    Type
+                  </span>
+                  {([
+                    { id: "all", label: `All (${aiResults.length})` },
+                    { id: "jwt", label: `JWT (${aiFilterCounts.jwt})` },
+                    { id: "sas", label: `SAS (${aiFilterCounts.sas})` },
+                  ] as const).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setAiFilterType(opt.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                        aiFilterType === opt.id ? admin.tabActive : admin.tabInactive
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] uppercase tracking-wide text-slate-500 dark:text-white/35 mr-1">
+                    Decision
+                  </span>
+                  {([
+                    { id: "all", label: "All" },
+                    { id: "ALLOW", label: `ALLOW (${aiFilterCounts.ALLOW})` },
+                    { id: "MONITOR", label: `MONITOR (${aiFilterCounts.MONITOR})` },
+                    { id: "REVIEW", label: `REVIEW (${aiFilterCounts.REVIEW})` },
+                    { id: "REVOKE", label: `REVOKE (${aiFilterCounts.REVOKE})` },
+                  ] as const).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setAiFilterDecision(opt.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                        aiFilterDecision === opt.id ? admin.tabActive : admin.tabInactive
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="search"
+                    value={aiFilterQuery}
+                    onChange={(e) => setAiFilterQuery(e.target.value)}
+                    placeholder="Tìm email, blob, file id, token ref…"
+                    className="min-w-[220px] flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
+                  />
+                  <span className="text-xs text-slate-500 dark:text-white/35">
+                    Hiện {filteredAiResults.length}/{aiResults.length}
+                  </span>
+                  {(aiFilterType !== "all" || aiFilterDecision !== "all" || aiFilterQuery.trim()) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAiFilterType("all");
+                        setAiFilterDecision("all");
+                        setAiFilterQuery("");
+                      }}
+                      className="text-xs px-3 py-1.5 rounded-lg border border-white/10 text-slate-400 hover:text-white hover:bg-white/5 transition"
+                    >
+                      Reset
+                    </button>
+                  )}
                 </div>
               </div>
 
               {/* Per-token results */}
               <div className={`${surfaceCard} overflow-hidden`}>
-                <div className={`px-5 py-3 border-b ${admin.divider}`}>
+                <div className={`px-5 py-3 border-b ${admin.divider} flex items-center gap-2`}>
                   <h4 className="text-xs font-semibold text-slate-600 dark:text-white/50 uppercase tracking-wide">{t("admin.tokenSecurity.perTokenDetails")}</h4>
+                  <span className="text-[11px] text-slate-500 dark:text-white/30">
+                    {filteredAiResults.length} token
+                  </span>
                 </div>
                 <div className="divide-y divide-white/[0.04]">
-                  {aiResults.map((r, i) => {
-                    const rule = aiRuleMetrics[i];
+                  {!filteredAiResults.length ? (
+                    <p className="px-5 py-8 text-center text-sm text-slate-500 dark:text-white/35">
+                      Không có token khớp bộ lọc hiện tại.
+                    </p>
+                  ) : (
+                  filteredAiResults.map((r) => {
+                    const rule = r.token_id ? aiRuleByTokenId.get(r.token_id) : undefined;
                     if (r.error) return (
-                      <div key={r.token_id ?? i} className="px-5 py-3 text-xs text-rose-300/60">
+                      <div key={r.token_id ?? `${r.email}-${r.decision}`} className="px-5 py-3 text-xs text-rose-300/60">
                         {r.token_id?.slice(0, 12)}… — {t("admin.tokenSecurity.tokenError")} {r.error}
                       </div>
                     );
@@ -1963,7 +2337,7 @@ export default function AdminTokenSecurityPage() {
                     const showDisagree = r.agreement?.status === "disagree";
                       const primaryLabel = r.subject_label ?? rule?.email ?? r.email ?? r.blob_name ?? r.token_id?.slice(0, 20) ?? "—";
                     return (
-                      <details key={r.token_id ?? i} className="group px-5 py-3.5">
+                      <details key={r.token_id ?? `${primaryLabel}-${r.decision}`} className="group px-5 py-3.5">
                         <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
                           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
                             <span className="text-xs text-slate-800 dark:text-white/75 truncate max-w-[200px] sm:max-w-xs">
@@ -2079,7 +2453,8 @@ export default function AdminTokenSecurityPage() {
                         </div>
                       </details>
                     );
-                  })}
+                  })
+                  )}
                 </div>
               </div>
             </>

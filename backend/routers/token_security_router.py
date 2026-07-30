@@ -41,7 +41,7 @@ from auth import CurrentUser, get_current_user
 from db.dependencies import get_db, get_db_context
 from db.models import AiJobStatus, TokenAiAnalysisJob, TokenAiScoreSnapshot
 from services import ai_realtime, file_activity, locksend_ai, owner_security, token_security
-from sqlalchemy import desc, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -523,10 +523,10 @@ async def get_overview_top_risk(
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=15, ge=1, le=100),
 ):
-    """Lazy-load top N tokens có risk_score cao nhất (sau khi overview skeleton render)."""
+    """Lazy-load top N tokens + cập nhật KPI High Risk (rule engine)."""
     _require_admin(current)
-    top_list = await token_security.get_high_risk_tokens(db, limit=limit)
-    return {"top_risk_tokens": top_list}
+    data = await token_security.get_high_risk_tokens(db, limit=limit)
+    return data
 
 
 # ── Token list / Rule engine endpoints ─────────────────────────────────────────
@@ -916,11 +916,30 @@ async def ai_get_job_detail(
     }
 
     if include_details and snapshots_limit > 0:
-        # Ưu tiên lấy snapshot theo job_id — mỗi lần Analyze là một report độc lập.
-        base_q = select(TokenAiScoreSnapshot).order_by(desc(TokenAiScoreSnapshot.created_at))
+        # Ưu tiên REVOKE/REVIEW + AI score cao trước — tránh miss token rủi ro khi bị cắt limit.
+        decision_priority = case(
+            (func.upper(TokenAiScoreSnapshot.decision) == "REVOKE", 0),
+            (func.upper(TokenAiScoreSnapshot.decision) == "REVIEW", 1),
+            (func.upper(TokenAiScoreSnapshot.decision) == "MONITOR", 2),
+            else_=3,
+        )
+        base_q = select(TokenAiScoreSnapshot).order_by(
+            decision_priority.asc(),
+            desc(TokenAiScoreSnapshot.ai_score_pct),
+            desc(TokenAiScoreSnapshot.created_at),
+        )
         snap_q = base_q.where(TokenAiScoreSnapshot.job_id == str(job.id)).limit(snapshots_limit)
         snaps = (await db.execute(snap_q)).scalars().all()
         payload["snapshots_source"] = "job_id"
+
+        total_available = (
+            await db.scalar(
+                select(func.count())
+                .select_from(TokenAiScoreSnapshot)
+                .where(TokenAiScoreSnapshot.job_id == str(job.id))
+            )
+            or 0
+        )
 
         if not snaps and job.created_at is not None:
             # Job cũ (trước migration o6p7q8r9s0t1) chưa có job_id → suy theo cửa sổ thời gian.
@@ -936,6 +955,7 @@ async def ai_get_job_detail(
                 )
             snaps = (await db.execute(legacy_q.limit(snapshots_limit))).scalars().all()
             payload["snapshots_source"] = "time_window"
+            total_available = len(snaps)
 
         seen_refs: set[str] = set()
         deduped_snaps: list[TokenAiScoreSnapshot] = []
@@ -968,6 +988,8 @@ async def ai_get_job_detail(
             for s in deduped_snaps
         ]
         payload["snapshots_total"] = len(deduped_snaps)
+        payload["snapshots_total_available"] = int(total_available)
+        payload["snapshots_truncated"] = int(total_available) > len(deduped_snaps)
     return payload
 
 

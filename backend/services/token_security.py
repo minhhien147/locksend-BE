@@ -516,13 +516,27 @@ async def build_overview(
         return result
 
 
-async def get_high_risk_tokens(db: AsyncSession, *, limit: int = 15) -> list[dict[str, Any]]:
-    """Lấy top-N tokens có risk_score cao nhất (sau khi overview skeleton render)."""
+async def get_high_risk_tokens(db: AsyncSession, *, limit: int = 15) -> dict[str, Any]:
+    """
+    Lazy-load top-N tokens + risk counts (sau khi overview skeleton render).
+
+    Overview nhẹ cố ý bỏ quét rule-engine nên high_risk_tokens luôn = 0;
+    endpoint này bổ sung đúng số liệu KPI High Risk / Critical / auto-revoke.
+    """
     jwt_metrics = await get_jwt_token_metrics(db)
     sas_metrics = await get_sas_token_metrics(db, include_expired=True)
     combined = jwt_metrics + sas_metrics
     combined.sort(key=lambda x: x["risk_score"], reverse=True)
-    return combined[:limit]
+    return {
+        "top_risk_tokens": combined[:limit],
+        "high_risk_tokens": sum(1 for m in combined if m["risk_score"] >= 50),
+        "critical_tokens": sum(1 for m in combined if m["risk_score"] >= 75),
+        "auto_revoke_candidates": sum(
+            1
+            for m in combined
+            if m["recommendation"] == "REVOKE" and not m.get("is_revoked")
+        ),
+    }
 
 
 async def build_security_snapshot(
