@@ -1,6 +1,7 @@
 """upload_router.py — Upload endpoints: single-shot và multipart."""
 from __future__ import annotations
 
+import asyncio
 import base64 as b64mod
 import hashlib
 import json
@@ -17,7 +18,11 @@ from auth import CurrentUser, require_roles, require_verified_email
 from db.dependencies import get_db
 from db.models import File as FileModel, FileRecipient, RecipientStatus, UploadLog, UploadSession, User
 from schemas.files import MultipartFinalizeRequest, MultipartInitResponse, SasResponse
-from services.azure_storage import CONTAINER_NAME, get_blob_service_client
+from services.azure_storage import (
+    CONTAINER_NAME,
+    generate_stage_sas_url,
+    get_blob_service_client,
+)
 from services.vault_storage import assert_vault_quota, resolve_folder
 
 from routers._upload_helpers import (
@@ -97,11 +102,15 @@ async def upload_file(
     try:
         client = get_blob_service_client()
         blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
-        blob_client.upload_blob(
-            ciphertext,
-            overwrite=True,
-            metadata=blob_meta,
-        )
+
+        def _upload() -> None:
+            blob_client.upload_blob(
+                ciphertext,
+                overwrite=True,
+                metadata=blob_meta,
+            )
+
+        await asyncio.to_thread(_upload)
     except Exception as exc:
         logger.exception("Upload failed for user %s: %s", current.id, exc)
         raise HTTPException(status_code=500, detail="Upload failed")
@@ -223,10 +232,11 @@ async def multipart_init(
     current: CurrentUser = Depends(require_roles("owner", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bước 1: Khởi tạo phiên multipart upload."""
+    """Bước 1: Khởi tạo phiên multipart upload + SAS stage trực tiếp Azure."""
     safe_name = sanitize_filename(filename)
     blob_name = f"{uuid.uuid4()}/{safe_name}.lsc"
     session_id = str(uuid.uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
 
     db.add(UploadSession(
         owner_id=current.id,
@@ -235,9 +245,24 @@ async def multipart_init(
         original_filename=filename,
         chunk_size_bytes=chunk_size_bytes,
         status="initiated",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        expires_at=expires_at,
     ))
-    return MultipartInitResponse(blob_name=blob_name, upload_id=session_id)
+
+    stage_sas_url: str | None = None
+    stage_expires_at: str | None = None
+    try:
+        stage_sas_url, stage_expires_at = await asyncio.to_thread(
+            generate_stage_sas_url, blob_name, 24
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Không tạo stage SAS — FE sẽ proxy qua BE: %s", exc)
+
+    return MultipartInitResponse(
+        blob_name=blob_name,
+        upload_id=session_id,
+        stage_sas_url=stage_sas_url,
+        stage_expires_at=stage_expires_at,
+    )
 
 
 @router.put("/upload/multipart/{blob_name:path}/chunk/{chunk_index}")
@@ -248,7 +273,7 @@ async def multipart_upload_chunk(
     current: CurrentUser = Depends(require_roles("owner", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bước 2: Stage một block (chunk) lên Azure Block Blob."""
+    """Bước 2: Stage một block (chunk) lên Azure Block Blob (proxy fallback)."""
     if chunk_index < 0 or chunk_index > 49_999:
         raise HTTPException(status_code=400, detail="chunk_index ngoài giới hạn (0–49999)")
 
@@ -274,7 +299,7 @@ async def multipart_upload_chunk(
     try:
         client = get_blob_service_client()
         blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
-        blob_client.stage_block(block_id, data)
+        await asyncio.to_thread(blob_client.stage_block, block_id, data)
     except Exception as exc:
         logger.exception("Stage block failed: %s", exc)
         raise HTTPException(status_code=500, detail="Stage block failed")
@@ -285,6 +310,37 @@ async def multipart_upload_chunk(
         .values(uploaded_chunk_count=UploadSession.uploaded_chunk_count + 1, status="uploading")
     )
     return {"chunk_index": chunk_index, "block_id": block_id, "size": len(data)}
+
+
+@router.put("/upload/multipart/{blob_name:path}/chunk/{chunk_index}/ack")
+async def multipart_ack_chunk(
+    blob_name: str,
+    chunk_index: int,
+    current: CurrentUser = Depends(require_roles("owner", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Đếm chunk sau khi FE stage thẳng Azure (không nhận body — nhẹ)."""
+    if chunk_index < 0 or chunk_index > 49_999:
+        raise HTTPException(status_code=400, detail="chunk_index ngoài giới hạn (0–49999)")
+
+    session = (
+        await db.execute(
+            select(UploadSession).where(
+                UploadSession.blob_name == blob_name,
+                UploadSession.owner_id == current.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Upload session không tồn tại")
+    _assert_session_usable(session)
+
+    await db.execute(
+        update(UploadSession)
+        .where(UploadSession.blob_name == blob_name)
+        .values(uploaded_chunk_count=UploadSession.uploaded_chunk_count + 1, status="uploading")
+    )
+    return {"chunk_index": chunk_index, "acked": True}
 
 
 @router.post("/upload/multipart/{blob_name:path}/finalize", response_model=SasResponse)
@@ -310,16 +366,34 @@ async def multipart_finalize(
 
     # A08: client không được khai nhiều chunk hơn số block đã thực sự stage —
     # nếu không, blob commit sẽ không khớp chunk layout dùng khi tải về.
-    if body.chunk_count > (session.uploaded_chunk_count or 0):
+    # Direct-to-Azure: ưu tiên đếm uncommitted blocks trên Azure; fallback DB counter.
+    staged_count = session.uploaded_chunk_count or 0
+    block_ids = [b64mod.b64encode(f"{i:08d}".encode()).decode() for i in range(body.chunk_count)]
+
+    try:
+        client = get_blob_service_client()
+        blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
+
+        def _count_uncommitted() -> int:
+            _committed, uncommitted = blob_client.get_block_list(
+                block_list_type="uncommitted"
+            )
+            ids = {b.id for b in (uncommitted or [])}
+            return sum(1 for bid in block_ids if bid in ids)
+
+        azure_staged = await asyncio.to_thread(_count_uncommitted)
+        staged_count = max(staged_count, azure_staged)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Không đọc uncommitted block list, dùng DB counter: %s", exc)
+
+    if body.chunk_count > staged_count:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"chunk_count={body.chunk_count} lớn hơn số chunk đã upload "
-                f"({session.uploaded_chunk_count or 0})"
+                f"({staged_count})"
             ),
         )
-
-    block_ids = [b64mod.b64encode(f"{i:08d}".encode()).decode() for i in range(body.chunk_count)]
 
     try:
         meta_preview = json.loads(body.metadata_json)
@@ -332,7 +406,7 @@ async def multipart_finalize(
         blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
         # Không gắn metadata lúc commit — file lớn có chunkChecksums[] làm metadata
         # vượt 8 KB Azure và commit_block_list 500. Metadata đầy đủ lưu DB + set_blob_metadata sau.
-        blob_client.commit_block_list(block_ids)
+        await asyncio.to_thread(blob_client.commit_block_list, block_ids)
     except Exception as exc:
         logger.exception("Commit block list failed: %s", exc)
         raise HTTPException(status_code=500, detail="Commit block list failed")
@@ -354,7 +428,8 @@ async def multipart_finalize(
     # nên có thể báo 1 byte cho blob nhiều GB để né quota vault.
     declared_size = int(body.file_size_bytes or meta.get("file_size_bytes", 0) or meta.get("fileSize", 0) or 0)
     try:
-        file_size = int(blob_client.get_blob_properties().size)
+        props = await asyncio.to_thread(blob_client.get_blob_properties)
+        file_size = int(props.size)
     except Exception as exc:  # noqa: BLE001
         logger.warning("get_blob_properties sau finalize thất bại, dùng số client khai: %s", exc)
         file_size = declared_size

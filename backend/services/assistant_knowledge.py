@@ -18,7 +18,7 @@ LOCKSEND_ASSISTANT_KNOWLEDGE = """
 - Lộ private key: attacker có thể giải mã mọi file đã bọc cho key đó; rotate keypair bảo vệ file tương lai.
 
 ## Upload / Download
-- File >= 64MB: chunked encryption 64MB + multipart upload Azure.
+- File >= 64MB: chunked encryption (mặc định 4MB/chunk) + multipart; browser Prefer Put Block thẳng Azure.
 - Download file lớn: tải/giải mã từng chunk, lưu ra đĩa — nên dùng Chrome hoặc Edge.
 - File < 64MB: single-shot; giới hạn RAM trình duyệt (~512MB–1GB tùy máy).
 - Gửi file: chọn recipient có public key hoặc dán public key X25519; nhận SAS link chia sẻ.

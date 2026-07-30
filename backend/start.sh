@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
 # Railway production: railway.json → startCommand "sh start.sh"
 PORT="${PORT:-8000}"
-# 2 worker: mỗi worker giữ pool DB riêng (xem db/session.py) nên nhiều worker sẽ
-# nhân số connection tới Postgres; Railway free cũng chỉ có vCPU chia sẻ.
-WEB_CONCURRENCY="${WEB_CONCURRENCY:-2}"
-# Access log ghi 1 dòng/request — tốn CPU đáng kể khi load test. ACCESS_LOG=false để tắt.
-ACCESS_LOG="${ACCESS_LOG:-true}"
+# Mỗi worker có pool DB riêng (db/session.py): tổng conn ≈ WEB_CONCURRENCY × (pool+overflow).
+# Railway Pro: 4 worker mặc định; chỉnh WEB_CONCURRENCY nếu Postgres gần trần max_connections.
+WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}"
+# Access log 1 dòng/request tốn CPU — tắt mặc định; bật ACCESS_LOG=true khi debug.
+ACCESS_LOG="${ACCESS_LOG:-false}"
 if [ "${ACCESS_LOG}" = "false" ]; then
   ACCESS_LOG_FLAG="--no-access-log"
 else

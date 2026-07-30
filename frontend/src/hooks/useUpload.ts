@@ -12,6 +12,7 @@ import {
   computeSHA256Hex,
   CHUNKED_THRESHOLD,
   DEFAULT_CHUNK_SIZE,
+  UPLOAD_CHUNK_CONCURRENCY,
   type ChunkedEncryptionMetadata,
 } from "../utils/crypto";
 import { getKeys, resetLockTimer } from "../utils/keyVault";
@@ -331,73 +332,98 @@ export function useUpload(): UseUploadReturn {
         const totalChunks = Math.ceil(file.size / DEFAULT_CHUNK_SIZE);
         setState((prev) => ({ ...prev, stage: "uploading" }));
 
-        const { blob_name } = await initMultipartUpload(
+        const { blob_name, stage_sas_url } = await initMultipartUpload(
           file.name,
           signal,
           DEFAULT_CHUNK_SIZE
         );
+        const stageSas = { url: stage_sas_url ?? null };
         const chunkChecksums: string[] = [];
+        const uploadedBytes = new Array<number>(totalChunks).fill(0);
 
-        for (let i = 0; i < totalChunks; i++) {
-          if (signal.aborted) throw new Error("CANCELLED");
-          // Upload dài có thể >15 phút — reset auto-lock vault để không bị hỏi passphrase giữa chừng.
-          resetLockTimer();
-          const start = i * DEFAULT_CHUNK_SIZE;
-          const end = Math.min(start + DEFAULT_CHUNK_SIZE, file.size);
-          const chunkSizeMB = parseFloat(
-            ((end - start) / (1024 * 1024)).toFixed(1)
-          );
-          const chunkPlainBytes = end - start;
-
+        const flushProgress = (doneEncrypt: number) => {
+          const transferred = uploadedBytes.reduce((a, b) => a + b, 0);
           setState((prev) => ({
             ...prev,
             chunkProgress: {
-              phase: "encrypt",
-              done: i,
+              phase: doneEncrypt < totalChunks ? "encrypt" : "upload",
+              done: Math.min(doneEncrypt, totalChunks),
               total: totalChunks,
-              currentMB: chunkSizeMB,
+              currentMB: parseFloat((DEFAULT_CHUNK_SIZE / (1024 * 1024)).toFixed(1)),
             },
-            bytesTransferred: start,
+            bytesTransferred: Math.min(transferred, file.size),
             bytesTotal: file.size,
           }));
+        };
 
-          const chunkBuffer = await file.slice(start, end).arrayBuffer();
-          if (signal.aborted) throw new Error("CANCELLED");
-          chunkChecksums.push(await computeSHA256Hex(chunkBuffer));
-          const encryptedChunk = await encryptChunk(
-            aesKey,
-            chunkBuffer,
-            baseNonce,
-            i
-          );
-          if (signal.aborted) throw new Error("CANCELLED");
+        // Pipeline: mã hóa tuần tự (giữ RAM thấp), upload song song tối đa N chunk.
+        let nextToEncrypt = 0;
+        const inflight = new Map<number, Promise<void>>();
 
-          setState((prev) => ({
-            ...prev,
-            chunkProgress: {
-              phase: "upload",
-              done: i,
-              total: totalChunks,
-              currentMB: chunkSizeMB,
-            },
-            bytesTransferred: start,
-          }));
-          await uploadChunk(
+        const startUpload = (index: number, encrypted: Uint8Array, plainLen: number) => {
+          const p = uploadChunk(
             blob_name,
-            i,
-            encryptedChunk,
-            (loaded, total) =>
-              setState((prev) => ({
-                ...prev,
-                bytesTransferred: start + Math.round((loaded / total) * chunkPlainBytes),
-              })),
-            signal
-          );
-          setState((prev) => ({
-            ...prev,
-            bytesTransferred: end,
-          }));
+            index,
+            encrypted,
+            (loaded, total) => {
+              uploadedBytes[index] = Math.round((loaded / Math.max(total, 1)) * plainLen);
+              flushProgress(nextToEncrypt);
+            },
+            signal,
+            stageSas
+          ).then(() => {
+            uploadedBytes[index] = plainLen;
+            inflight.delete(index);
+            flushProgress(nextToEncrypt);
+          });
+          inflight.set(index, p);
+          return p;
+        };
+
+        while (nextToEncrypt < totalChunks || inflight.size > 0) {
+          if (signal.aborted) throw new Error("CANCELLED");
+          resetLockTimer();
+
+          while (
+            nextToEncrypt < totalChunks &&
+            inflight.size < UPLOAD_CHUNK_CONCURRENCY
+          ) {
+            const i = nextToEncrypt;
+            const start = i * DEFAULT_CHUNK_SIZE;
+            const end = Math.min(start + DEFAULT_CHUNK_SIZE, file.size);
+            const plainLen = end - start;
+
+            setState((prev) => ({
+              ...prev,
+              chunkProgress: {
+                phase: "encrypt",
+                done: i,
+                total: totalChunks,
+                currentMB: parseFloat((plainLen / (1024 * 1024)).toFixed(1)),
+              },
+            }));
+
+            const chunkBuffer = await file.slice(start, end).arrayBuffer();
+            if (signal.aborted) throw new Error("CANCELLED");
+            chunkChecksums.push(await computeSHA256Hex(chunkBuffer));
+            const encryptedChunk = await encryptChunk(
+              aesKey,
+              chunkBuffer,
+              baseNonce,
+              i
+            );
+            if (signal.aborted) throw new Error("CANCELLED");
+
+            nextToEncrypt = i + 1;
+            startUpload(i, encryptedChunk, plainLen);
+          }
+
+          if (inflight.size > 0) {
+            await Promise.race(inflight.values());
+          }
         }
+
+        await Promise.all(inflight.values());
 
         const partialMeta = {
           isChunked: true as const,

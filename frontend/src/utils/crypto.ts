@@ -490,16 +490,19 @@ export async function decryptFile(
 // ─── Chunked Encryption ───────────────────────────────────────────────────────
 
 /**
- * Kích thước mặc định mỗi chunk: 64MB.
- * Đủ lớn để tối ưu I/O, đủ nhỏ để không gây OOM.
+ * Kích thước mặc định mỗi chunk: 4MB.
+ * Nhỏ hơn 64MB để BE/Azure chịu được burst nhiều request hơn (xem capacity summary).
  */
-export const DEFAULT_CHUNK_SIZE = 64 * 1024 * 1024;
+export const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
 
 /**
  * Ngưỡng tự động chuyển sang chế độ chunked.
  * File > 64MB → dùng chunked encryption + multipart upload.
  */
 export const CHUNKED_THRESHOLD = 64 * 1024 * 1024;
+
+/** Số chunk upload song song (direct Azure / proxy). */
+export const UPLOAD_CHUNK_CONCURRENCY = 3;
 
 /** File chunked ≥ ngưỡng này → download theo từng chunk, lưu thẳng ra đĩa. */
 export const STREAMING_DOWNLOAD_THRESHOLD = CHUNKED_THRESHOLD;

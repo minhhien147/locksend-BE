@@ -83,6 +83,29 @@ def generate_sas_url(blob_name: str, hours: int = 24) -> Tuple[str, str]:
     return sas_url, expires.isoformat()
 
 
+def generate_stage_sas_url(blob_name: str, hours: int = 24) -> Tuple[str, str]:
+    """
+    SAS ghi block (Put Block) — client stage trực tiếp lên Azure, không proxy qua BE.
+    Cần CORS trên Storage Account cho origin frontend.
+    """
+    expires = datetime.now(timezone.utc) + timedelta(hours=hours)
+    sas_token = generate_blob_sas(
+        account_name=STORAGE_ACCOUNT,
+        container_name=CONTAINER_NAME,
+        blob_name=blob_name,
+        account_key=None,
+        user_delegation_key=_get_delegation_key(expires),
+        permission=BlobSasPermissions(create=True, write=True),
+        expiry=expires,
+        protocol="https",
+    )
+    sas_url = (
+        f"https://{STORAGE_ACCOUNT}.blob.core.windows.net"
+        f"/{CONTAINER_NAME}/{blob_name}?{sas_token}"
+    )
+    return sas_url, expires.isoformat()
+
+
 def _get_delegation_key(expiry: datetime):
     client = get_blob_service_client()
     start = datetime.now(timezone.utc)

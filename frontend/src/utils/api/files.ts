@@ -20,6 +20,9 @@ export interface UploadResponse {
 export interface MultipartInitResponse {
   blob_name: string;
   upload_id: string;
+  /** SAS write — Put Block thẳng Azure khi có; fallback proxy qua BE. */
+  stage_sas_url?: string | null;
+  stage_expires_at?: string | null;
 }
 
 export interface RecipientPayload {
@@ -181,13 +184,36 @@ export async function initMultipartUpload(
   return response.data;
 }
 
+export type StageSasRef = { url: string | null };
+
 export async function uploadChunk(
   blobName: string,
   chunkIndex: number,
   chunkData: Uint8Array,
   onProgress?: (loaded: number, total: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  stageSas?: StageSasRef | string | null
 ): Promise<void> {
+  const stageRef: StageSasRef | null =
+    stageSas && typeof stageSas === "object"
+      ? stageSas
+      : stageSas
+        ? { url: stageSas }
+        : null;
+
+  if (stageRef?.url) {
+    try {
+      await uploadChunkDirect(stageRef.url, chunkIndex, chunkData, onProgress, signal);
+      await ackChunk(blobName, chunkIndex, signal);
+      return;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      // CORS / SAS — tắt direct cho các chunk sau, proxy qua BE
+      console.warn("Direct Azure stage failed, falling back to BE proxy", err);
+      stageRef.url = null;
+    }
+  }
+
   const formData = new FormData();
   const blob = new Blob([new Uint8Array(chunkData)], {
     type: "application/octet-stream",
@@ -205,6 +231,75 @@ export async function uploadChunk(
         : undefined,
       signal,
     }
+  );
+}
+
+/** Put Block thẳng Azure bằng stage SAS (không qua BE). */
+async function uploadChunkDirect(
+  stageSasUrl: string,
+  chunkIndex: number,
+  chunkData: Uint8Array,
+  onProgress?: (loaded: number, total: number) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const blockId = btoa(String(chunkIndex).padStart(8, "0"));
+  const url = new URL(stageSasUrl);
+  url.searchParams.set("comp", "block");
+  url.searchParams.set("blockid", blockId);
+
+  await new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url.toString(), true);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.setRequestHeader("x-ms-blob-type", "BlockBlob");
+    xhr.timeout = 0;
+
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded, e.total);
+        else onProgress(e.loaded, chunkData.byteLength);
+      };
+    }
+
+    const onAbort = () => {
+      xhr.abort();
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    xhr.onload = () => {
+      signal?.removeEventListener("abort", onAbort);
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`Azure Put Block HTTP ${xhr.status}`));
+    };
+    xhr.onerror = () => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("Azure Put Block network error"));
+    };
+    xhr.ontimeout = () => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("Azure Put Block timeout"));
+    };
+
+    xhr.send(new Uint8Array(chunkData));
+  });
+}
+
+async function ackChunk(
+  blobName: string,
+  chunkIndex: number,
+  signal?: AbortSignal
+): Promise<void> {
+  await api.put(
+    `/upload/multipart/${encodeURIComponent(blobName)}/chunk/${chunkIndex}/ack`,
+    null,
+    { signal, timeout: 60_000 }
   );
 }
 

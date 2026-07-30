@@ -45,6 +45,9 @@ class CiphertextInfoResponse(BaseModel):
 class MultipartInitResponse(BaseModel):
     blob_name: str
     upload_id: str
+    # SAS write để browser Put Block thẳng Azure (giảm tải BE). Null nếu tạo SAS thất bại.
+    stage_sas_url: Optional[str] = None
+    stage_expires_at: Optional[str] = None
 
 
 class RecipientIn(BaseModel):
