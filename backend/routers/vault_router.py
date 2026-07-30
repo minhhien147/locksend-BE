@@ -7,7 +7,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ from schemas.files import (
     VaultFolderOut,
     VaultQuotaOut,
 )
+from routers._upload_helpers import content_disposition_attachment
 from services.azure_storage import CONTAINER_NAME, delete_blob, get_blob_service_client
 from services.vault_storage import (
     assert_vault_quota,
@@ -408,7 +409,9 @@ async def download_vault_ciphertext(
         blob_client = client.get_blob_client(
             container=CONTAINER_NAME, blob=file.blob_name
         )
-        data = blob_client.download_blob().readall()
+        # A06/A10: stream thay vì readall() — tránh OOM khi proxy file lớn.
+        downloader = blob_client.download_blob()
+        content_length = getattr(downloader, "size", None)
     except Exception as exc:
         logger.exception("download_vault_ciphertext failed: %s", exc)
         raise HTTPException(status_code=502, detail="Không đọc được file từ storage")
@@ -417,14 +420,19 @@ async def download_vault_ciphertext(
         json.dumps(file.metadata_json, ensure_ascii=False).encode("utf-8")
     ).decode("ascii")
 
-    return Response(
-        content=data,
+    headers = {
+        "X-Encryption-Metadata-B64": meta_b64,
+        "X-File-Id": file.id,
+        # A03: tên file có nguồn từ client — helper chặn CR/LF chèn header.
+        "Content-Disposition": content_disposition_attachment(f"{file.original_filename}.lsc"),
+    }
+    if content_length is not None:
+        headers["Content-Length"] = str(content_length)
+
+    return StreamingResponse(
+        downloader.chunks(),
         media_type="application/octet-stream",
-        headers={
-            "X-Encryption-Metadata-B64": meta_b64,
-            "X-File-Id": file.id,
-            "Content-Disposition": f'attachment; filename="{file.original_filename}.lsc"',
-        },
+        headers=headers,
     )
 
 

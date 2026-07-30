@@ -28,21 +28,65 @@ _GEMINI_ALLOWED_HOSTS = {"generativelanguage.googleapis.com"}
 _VIRUSTOTAL_ALLOWED_HOSTS = {"www.virustotal.com", "virustotal.com"}
 
 
-def _resolve_and_check(host: str) -> None:
-    """Resolve hostname, từ chối nếu trỏ về private/loopback."""
+# Metadata service của cloud provider — luôn chặn, kể cả với AI service self-hosted.
+_METADATA_HOSTNAMES = {
+    "metadata.azure.internal",
+    "metadata.google.internal",
+    "instance-data",
+}
+
+# Link-local: nơi đặt IMDS (169.254.169.254). Chặn cả khi private range được cho phép.
+_LINK_LOCAL_NETWORKS = [
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _normalize_ip(value: str) -> ipaddress._BaseAddress | None:
+    """
+    Parse IP và gỡ bọc IPv4-mapped IPv6.
+
+    Không có bước unmap, `::ffff:169.254.169.254` sẽ không khớp 169.254.0.0/16
+    (so sánh IPv6 với network IPv4 luôn False) → bypass được mọi rule IPv4.
+    """
+    try:
+        addr = ipaddress.ip_address(value.strip().strip("[]"))
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address):
+        mapped = addr.ipv4_mapped
+        if mapped is not None:
+            return mapped
+        if getattr(addr, "sixtofour", None):
+            return addr.sixtofour
+    return addr
+
+
+def _resolved_ips(host: str) -> list[ipaddress._BaseAddress]:
+    """
+    Resolve hostname thành danh sách IP đã normalize.
+
+    Bắt buộc phải resolve: dạng IP thập phân ("2130706433") hay hostname trỏ về
+    IMDS không thể phát hiện bằng cách so khớp chuỗi hostname.
+    """
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
-        return  # Không resolve được → httpx sẽ tự lỗi
+        return []  # Không resolve được → httpx sẽ tự lỗi
 
+    out: list[ipaddress._BaseAddress] = []
     for _family, _type, _proto, _canon, sockaddr in infos:
-        ip_str = sockaddr[0]
-        try:
-            addr = ipaddress.ip_address(ip_str)
-        except ValueError:
-            continue
+        addr = _normalize_ip(str(sockaddr[0]))
+        if addr is not None:
+            out.append(addr)
+    return out
+
+
+def _resolve_and_check(host: str) -> None:
+    """Resolve hostname, từ chối nếu trỏ về private/loopback."""
+    for addr in _resolved_ips(host):
         for net in _BLOCKED_NETWORKS:
-            if addr in net:
+            if addr.version == net.version and addr in net:
                 raise HTTPException(
                     status_code=422,
                     detail="URL đích không được phép (internal network)",
@@ -102,9 +146,11 @@ def validate_gemini_base(url: str) -> str:
 
 def validate_locksend_ai_url(url: str) -> str:
     """
-    Validate LOCKSEND_AI_URL — cho phép HTTP (internal), nhưng phải là
-    domain/IP không phải cloud metadata endpoint.
-    Không dùng allowed_hosts vì AI server có thể self-hosted.
+    Validate LOCKSEND_AI_URL — cho phép HTTP và private range vì AI service là
+    dịch vụ nội bộ self-hosted, nhưng luôn chặn link-local / cloud metadata.
+
+    Khác các guard trên: kiểm tra trên IP đã RESOLVE, không phải chuỗi hostname,
+    nên chặn được cả `::ffff:169.254.169.254`, `2130706433` và hostname trỏ IMDS.
     """
     if not url:
         return url
@@ -114,17 +160,18 @@ def validate_locksend_ai_url(url: str) -> str:
         raise ValueError(f"LOCKSEND_AI_URL phải là http/https, nhận: {url}")
 
     host = (parsed.hostname or "").lower()
-    # Chặn Azure IMDS và link-local
-    if host in ("169.254.169.254", "metadata.azure.internal"):
+    if not host:
+        raise ValueError(f"LOCKSEND_AI_URL thiếu hostname: {url}")
+    if host in _METADATA_HOSTNAMES:
         raise ValueError(f"LOCKSEND_AI_URL trỏ tới địa chỉ bị cấm: {host}")
 
-    # Cố gắng parse IP để chặn private range nếu cần (check_dns tốn kém hơn)
-    try:
-        addr = ipaddress.ip_address(host)
-        # Chỉ chặn link-local + loopback khi không phải localhost dev
-        if addr in ipaddress.ip_network("169.254.0.0/16") or addr == ipaddress.ip_address("::1"):
-            raise ValueError(f"LOCKSEND_AI_URL trỏ tới địa chỉ bị cấm: {host}")
-    except ValueError as exc:
-        if "bị cấm" in str(exc):
-            raise
+    literal = _normalize_ip(host)
+    candidates = [literal] if literal is not None else _resolved_ips(host)
+
+    for addr in candidates:
+        for net in _LINK_LOCAL_NETWORKS:
+            if addr.version == net.version and addr in net:
+                raise ValueError(
+                    f"LOCKSEND_AI_URL trỏ tới địa chỉ bị cấm ({addr}): {host}"
+                )
     return url

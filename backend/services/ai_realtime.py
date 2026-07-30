@@ -190,21 +190,26 @@ async def _save_snapshot(
     result: dict[str, Any],
     *,
     source: str,
+    job_id: str | None = None,
 ) -> None:
-    db.add(_build_snapshot_obj(metric, result, source=source))
+    db.add(_build_snapshot_obj(metric, result, source=source, job_id=job_id))
 
 
 async def save_manual_snapshot(
     db: AsyncSession,
     metric: dict[str, Any],
     result: dict[str, Any],
+    *,
+    job_id: str | None = None,
 ) -> None:
-    await _save_snapshot(db, metric, result, source="manual")
+    await _save_snapshot(db, metric, result, source="manual", job_id=job_id)
 
 
 async def bulk_save_manual_snapshots(
     db: AsyncSession,
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    job_id: str | None = None,
 ) -> int:
     """
     Bulk save AI snapshots thay vì từng dòng — giảm round-trip DB.
@@ -214,7 +219,9 @@ async def bulk_save_manual_snapshots(
         return 0
     batch: list[TokenAiScoreSnapshot] = []
     for metric, result in pairs:
-        batch.append(_build_snapshot_obj(metric, result, source="bulk_manual"))
+        batch.append(
+            _build_snapshot_obj(metric, result, source="bulk_manual", job_id=job_id)
+        )
     db.add_all(batch)
     await db.flush()
     return len(batch)
@@ -298,6 +305,7 @@ def _build_snapshot_obj(
     result: dict[str, Any],
     *,
     source: str,
+    job_id: str | None = None,
 ) -> TokenAiScoreSnapshot:
     """Helper tạo Snapshot ORM object (không add vào session)."""
     import uuid as _uuid_mod
@@ -312,6 +320,7 @@ def _build_snapshot_obj(
     rule_score_raw = int(metric.get("risk_score") or 0)
     return TokenAiScoreSnapshot(
         id=str(_uuid_mod.uuid4()),
+        job_id=job_id,
         token_type=str(metric.get("token_type") or "unknown"),
         token_ref=token_ref,
         user_id=user_id,
@@ -329,8 +338,9 @@ async def _save_snapshot(
     result: dict[str, Any],
     *,
     source: str,
+    job_id: str | None = None,
 ) -> None:
-    db.add(_build_snapshot_obj(metric, result, source=source))
+    db.add(_build_snapshot_obj(metric, result, source=source, job_id=job_id))
     await db.flush()
 
 

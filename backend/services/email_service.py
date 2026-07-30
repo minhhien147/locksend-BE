@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import logging
 import os
 import smtplib
@@ -151,18 +152,24 @@ def _build_html(
     file_name: str | None,
     alert_type: str,
 ) -> str:
+    # A03: title/message/file_name chứa dữ liệu do user kiểm soát (tên file,
+    # nội dung cảnh báo). Không escape thì `<img onerror=...>` sẽ chạy trong
+    # mail client hỗ trợ HTML.
+    safe_title = html.escape(title or "")
+    safe_file_name = html.escape(file_name) if file_name else None
+
     file_row = ""
-    if file_name:
+    if safe_file_name:
         file_row = f"""
         <tr>
           <td style="padding:4px 24px 8px;">
             <span style="font-size:12px;color:#6b7280;">File liên quan:&nbsp;</span>
-            <strong style="color:#1f2937;">{file_name}</strong>
+            <strong style="color:#1f2937;">{safe_file_name}</strong>
           </td>
         </tr>"""
 
     badge_color = _BADGE_COLORS.get(alert_type, "#6b7280")
-    msg_html = message.replace("\n", "<br>")
+    msg_html = html.escape(message or "").replace("\n", "<br>")
 
     return f"""<!DOCTYPE html>
 <html lang="vi">
@@ -190,7 +197,7 @@ def _build_html(
         <!-- Title -->
         <tr>
           <td style="padding:8px 24px 4px;">
-            <h2 style="margin:0;color:#1f2937;font-size:18px;font-weight:700;">{title}</h2>
+            <h2 style="margin:0;color:#1f2937;font-size:18px;font-weight:700;">{safe_title}</h2>
           </td>
         </tr>
         {file_row}
@@ -258,7 +265,9 @@ async def send_verification_otp_email(
         logger.warning("Email not configured — cannot send verification OTP to %s", to_email)
         return
 
-    subject = f"[LockSend] Mã xác minh: {code}"
+    # A09: OTP chỉ nằm trong body. Subject xuất hiện ở log mail server, thông báo
+    # push và lock screen — phạm vi rò rỉ rộng hơn nhiều.
+    subject = "[LockSend] Mã xác minh email của bạn"
     html_body = _build_otp_html(code, expires_minutes)
     loop = asyncio.get_event_loop()
     try:

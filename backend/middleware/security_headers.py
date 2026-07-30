@@ -13,14 +13,13 @@ import os
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-# Cho phép override từng header qua env var (empty string = bỏ header đó)
+# API JSON không phục vụ HTML/JS — CSP chặt, không 'unsafe-inline'.
+# FE host nên đặt CSP riêng; override bằng CSP_POLICY nếu cần.
 _CSP_DEFAULT = (
-    "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; "
-    "connect-src 'self'; "
-    "frame-ancestors 'none';"
+    "default-src 'none'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none';"
 )
 
 _STATIC_HEADERS: tuple[tuple[str, str], ...] = (

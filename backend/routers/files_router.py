@@ -35,15 +35,26 @@ async def get_sas_token(
     current: CurrentUser = Depends(require_roles("owner", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Tạo SAS token read-only 1h cho blob đã tồn tại."""
+    """Tạo SAS token read-only 1h cho blob đã tồn tại (chỉ owner của blob)."""
     row = (await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))).scalar_one_or_none()
+    # A01: blob_name không được coi là bí mật — bắt buộc kiểm tra quyền sở hữu,
+    # nếu không bất kỳ owner nào biết blob_name cũng mint được SAS đọc file người khác.
+    if row is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy file")
+    if row.owner_id != current.id and current.role != "admin":
+        logger.warning(
+            "SECURITY A01: từ chối SAS cho blob của người khác — user=%s blob=%s owner=%s",
+            current.id, blob_name, row.owner_id,
+        )
+        raise HTTPException(status_code=403, detail="Bạn không có quyền truy cập file này")
+
     sas_url, expires_at = await generate_and_track_sas(
         request, db, current,
-        blob_name=blob_name, file_id=row.id if row else None,
+        blob_name=blob_name, file_id=row.id,
         hours=1, endpoint=f"/sas-token/{blob_name}",
     )
     return SasResponse(
-        sas_url=sas_url, blob_name=blob_name, expires_at=expires_at, file_id=row.id if row else None
+        sas_url=sas_url, blob_name=blob_name, expires_at=expires_at, file_id=row.id
     )
 
 

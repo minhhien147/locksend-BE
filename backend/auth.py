@@ -9,7 +9,8 @@ Flow:
 
 Supported token formats:
   - HS256 symmetric (dev/test): JWT_SECRET phải set
-  - RS256 / ES256 asymmetric (production): JWT_PUBLIC_KEY phải set
+  - RS256 / ES256 asymmetric (production):
+      JWT_PRIVATE_KEY để ký (encode), JWT_PUBLIC_KEY để verify (decode)
 """
 
 from __future__ import annotations
@@ -34,26 +35,44 @@ logger = logging.getLogger(__name__)
 
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_SECRET = os.getenv("JWT_SECRET", "")            # dùng cho HS256
-JWT_PUBLIC_KEY = os.getenv("JWT_PUBLIC_KEY", "")    # dùng cho RS256/ES256
+JWT_PUBLIC_KEY = os.getenv("JWT_PUBLIC_KEY", "")    # verify RS256/ES256
+JWT_PRIVATE_KEY = os.getenv("JWT_PRIVATE_KEY", "")  # sign RS256/ES256
 JWT_ISSUER = os.getenv("JWT_ISSUER", "")            # bỏ trống = không check
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "")        # bỏ trống = không check
 JWT_LEEWAY_SECONDS = int(os.getenv("JWT_LEEWAY_SECONDS", "10"))
 
+# A01: Role mặc định khi tự provision user từ token — không bao giờ lấy từ claim.
+_DEFAULT_NEW_USER_ROLE = "owner"
+
+
+def _load_pem(value: str, *, label: str) -> str:
+    """Hỗ trợ inline PEM hoặc đường dẫn file."""
+    if not value:
+        raise RuntimeError(f"{label} must be set for {JWT_ALGORITHM}")
+    if value.startswith("-----"):
+        return value
+    with open(value) as f:
+        return f.read()
+
 
 @lru_cache(maxsize=1)
-def _signing_key() -> str:
-    """Trả về key để verify JWT (chỉ load 1 lần)."""
+def _verify_key() -> str:
+    """Key dùng để verify JWT (public key cho asymmetric, secret cho HS*)."""
     if JWT_ALGORITHM.startswith("HS"):
         if not JWT_SECRET:
             raise RuntimeError("JWT_SECRET must be set for HS256")
         return JWT_SECRET
-    if not JWT_PUBLIC_KEY:
-        raise RuntimeError("JWT_PUBLIC_KEY must be set for RS256/ES256")
-    # Hỗ trợ inline PEM hoặc đường dẫn file
-    if JWT_PUBLIC_KEY.startswith("-----"):
-        return JWT_PUBLIC_KEY
-    with open(JWT_PUBLIC_KEY) as f:
-        return f.read()
+    return _load_pem(JWT_PUBLIC_KEY, label="JWT_PUBLIC_KEY")
+
+
+@lru_cache(maxsize=1)
+def _signing_key() -> str:
+    """Key dùng để ký JWT (private key cho asymmetric, secret cho HS*)."""
+    if JWT_ALGORITHM.startswith("HS"):
+        if not JWT_SECRET:
+            raise RuntimeError("JWT_SECRET must be set for HS256")
+        return JWT_SECRET
+    return _load_pem(JWT_PRIVATE_KEY, label="JWT_PRIVATE_KEY")
 
 
 # ── Bearer scheme ─────────────────────────────────────────────────────────────
@@ -89,7 +108,7 @@ def verify_jwt(token: str) -> dict:
         decode_kwargs["audience"] = JWT_AUDIENCE
 
     try:
-        return jwt.decode(token, _signing_key(), **decode_kwargs)
+        return jwt.decode(token, _verify_key(), **decode_kwargs)
     except jwt.ExpiredSignatureError:
         raise _unauthorized("Token đã hết hạn")
     except jwt.InvalidAudienceError:
@@ -97,7 +116,10 @@ def verify_jwt(token: str) -> dict:
     except jwt.InvalidIssuerError:
         raise _unauthorized("Token issuer không hợp lệ")
     except jwt.DecodeError as exc:
-        raise _unauthorized(f"Token không hợp lệ: {exc}")
+        # A05: chi tiết lỗi decode chỉ ghi log phía server — trả ra ngoài sẽ giúp
+        # attacker dò định dạng/algorithm của token.
+        logger.warning("JWT decode failed: %s", exc)
+        raise _unauthorized("Token không hợp lệ")
 
 
 # ── Current user dependency ───────────────────────────────────────────────────
@@ -138,21 +160,20 @@ async def get_current_user(
     sub: str = payload["sub"]
     email: str | None = payload.get("email")
     name: str | None = payload.get("name") or payload.get("preferred_username")
-    # Ưu tiên claim "role", fallback "roles" (array), default "owner"
-    role: str = payload.get("role") or (
-        payload.get("roles", ["owner"])[0]
-        if isinstance(payload.get("roles"), list)
-        else "owner"
-    )
 
     result = await db.execute(select(User).where(User.external_id == sub))
     user = result.scalar_one_or_none()
 
     if user is None:
-        user = User(external_id=sub, email=email, display_name=name, role=role)
+        # A01: role của user mới KHÔNG được lấy từ claim trong token. Nếu tin
+        # claim, một JWT hợp lệ với sub lạ + role=admin sẽ tự tạo ra admin.
+        # Nâng quyền chỉ qua DB (create_admin.py / endpoint admin).
+        user = User(
+            external_id=sub, email=email, display_name=name, role=_DEFAULT_NEW_USER_ROLE
+        )
         db.add(user)
         await db.flush()
-        logger.info("New user provisioned: sub=%s role=%s", sub, role)
+        logger.info("New user provisioned: sub=%s role=%s", sub, _DEFAULT_NEW_USER_ROLE)
     else:
         # Sync email/name nếu thay đổi ở IdP
         updated = False

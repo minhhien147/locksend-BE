@@ -99,11 +99,16 @@ def get_request_id(request: Any) -> str | None:
 
 
 def get_ip(request: Any) -> str | None:
-    """Lấy client IP, ưu tiên X-Forwarded-For (nếu đứng sau proxy)."""
+    """
+    Lấy client IP. Chỉ tin số hop cuối do proxy của mình thêm vào — hop đầu của
+    X-Forwarded-For do client gửi nên có thể giả mạo, làm sai lệch audit log.
+    """
     try:
-        xff = request.headers.get("X-Forwarded-For")
-        if xff:
-            return xff.split(",")[0].strip()
-        return request.client.host if request.client else None
-    except Exception:
-        return None
+        from services.client_ip import client_ip
+
+        return client_ip(request)
+    except Exception:  # noqa: BLE001
+        try:
+            return request.client.host if request.client else None
+        except Exception:  # noqa: BLE001
+            return None

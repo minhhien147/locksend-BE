@@ -20,10 +20,8 @@ from routers._auth_helpers import (
     DisplayNameHistoryOut,
     PublicKeyOut,
     RegisterRequest,
-    TokenResponse,
     UserOut,
     hash_password,
-    make_token_response,
     require_admin,
     to_user_out,
 )
@@ -167,14 +165,18 @@ async def list_users(
     return [to_user_out(u) for u in rows]
 
 
-@router.post("/admin/users", response_model=TokenResponse, status_code=201, tags=["admin"])
+@router.post("/admin/users", response_model=UserOut, status_code=201, tags=["admin"])
 async def admin_create_user(
     body: RegisterRequest,
     request: Request,
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin tạo tài khoản với role tuỳ chọn."""
+    """Admin tạo tài khoản với role tuỳ chọn.
+
+    A01: Không cấp access token của user mới cho admin — trả UserOut thôi
+    để tránh credential impersonation bị log/cache ở phía client.
+    """
     require_admin(current)
     existing = (await db.execute(select(User).where(User.email == body.username))).scalar_one_or_none()
     if existing:
@@ -199,7 +201,7 @@ async def admin_create_user(
         target_role=user.role,
         request_id=audit.get_request_id(request),
     )
-    return make_token_response(user)
+    return to_user_out(user)
 
 
 @router.patch("/admin/users/{user_id}/role", response_model=UserOut, tags=["admin"])

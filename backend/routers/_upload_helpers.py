@@ -1,12 +1,15 @@
 """_upload_helpers.py — Shared constants, schemas và helpers dùng chung bởi upload sub-routers."""
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import os
 import re
 import unicodedata
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _DOT_SEGMENTS = re.compile(r'\.{2,}')
+_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f]')
 _MAX_FILENAME_LEN = 200
 
 
@@ -60,11 +64,123 @@ def sanitize_filename(filename: str) -> str:
     return name or "upload"
 
 
+def sanitize_display_filename(filename: str) -> str:
+    """
+    A03: Tên hiển thị / lưu DB. Giữ dấu tiếng Việt và khoảng trắng (khác
+    sanitize_filename dùng cho blob path), nhưng loại control char + CR/LF để
+    không thể chèn header khi tên được đưa vào Content-Disposition sau này.
+    """
+    if not filename:
+        return "upload"
+    name = unicodedata.normalize("NFC", filename)
+    name = _CONTROL_CHARS.sub("", name)
+    name = re.split(r'[/\\]', name)[-1]
+    name = name.strip(". ")
+    return name[:_MAX_FILENAME_LEN] or "upload"
+
+
+def content_disposition_attachment(filename: str) -> str:
+    """
+    A03: Dựng Content-Disposition theo RFC 6266 — ASCII fallback đã escape dấu
+    ngoặc kép + filename* UTF-8 percent-encoded cho tên có dấu.
+    """
+    safe = sanitize_display_filename(filename)
+    ascii_fallback = (
+        safe.encode("ascii", "replace")
+        .decode("ascii")
+        .replace('"', "_")
+        .replace("\\", "_")
+    )
+    return (
+        f'attachment; filename="{ascii_fallback}"; '
+        f"filename*=UTF-8''{quote(safe, safe='')}"
+    )
+
+
 def get_client_ip(request: Request) -> str | None:
-    xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else None
+    """A09: IP dùng cho sas_token_records — không tin hop client tự thêm."""
+    from services.client_ip import client_ip
+
+    return client_ip(request)
+
+
+# A04: Hạn mức kích thước upload ──────────────────────────────────────────────
+# Single-shot đọc trọn ciphertext vào RAM nên phải chặt hơn; file lớn dùng
+# multipart. 0 = tắt kiểm tra.
+MAX_SINGLE_UPLOAD_BYTES = int(os.getenv("MAX_SINGLE_UPLOAD_BYTES", str(200 * 1024 * 1024)))
+MAX_CHUNK_UPLOAD_BYTES = int(os.getenv("MAX_CHUNK_UPLOAD_BYTES", str(128 * 1024 * 1024)))
+
+# Azure Blob user metadata: tổng tên + giá trị ≤ 8 KB. File chunked lớn có
+# chunkChecksums[] làm JSON/base64 vượt ngưỡng → finalize commit_block_list 500.
+_AZURE_BLOB_METADATA_BUDGET = int(os.getenv("AZURE_BLOB_METADATA_BUDGET", "8192"))
+_AZURE_METADATA_KEY_OVERHEAD = 256
+
+_READ_BLOCK = 1024 * 1024
+
+
+def azure_encryption_blob_metadata(
+    metadata_json: str,
+    *,
+    file_id: str | None = None,
+    ciphertext_checksum: str | None = None,
+    has_chunk_checksums: bool | None = None,
+) -> dict[str, str]:
+    """
+  Ghi metadata mã hoá lên Azure Blob trong giới hạn 8 KB.
+
+  Metadata đầy đủ (kể cả chunkChecksums) luôn lưu trong files.metadata_json.
+  Khi quá lớn chỉ ghi cờ metadata_in_db — download đọc từ DB.
+  """
+    result: dict[str, str] = {}
+    b64 = base64.b64encode(metadata_json.encode("utf-8")).decode("ascii")
+    max_b64_len = max(512, _AZURE_BLOB_METADATA_BUDGET - _AZURE_METADATA_KEY_OVERHEAD)
+
+    if len(b64) <= max_b64_len:
+        result["encryption_metadata_b64"] = b64
+    else:
+        result["metadata_in_db"] = "true"
+        if has_chunk_checksums is None:
+            try:
+                parsed = json.loads(metadata_json)
+                has_chunk_checksums = bool(parsed.get("chunkChecksums"))
+            except json.JSONDecodeError:
+                has_chunk_checksums = False
+        result["has_chunk_checksums"] = str(has_chunk_checksums).lower()
+        logger.info(
+            "Azure blob metadata quá lớn (%d bytes b64, budget %d) — chỉ ghi metadata_in_db",
+            len(b64),
+            max_b64_len,
+        )
+
+    if ciphertext_checksum:
+        result["ciphertext_checksum"] = ciphertext_checksum
+    if file_id:
+        result["file_id"] = file_id
+    return result
+
+
+async def read_upload_capped(upload: UploadFile, max_bytes: int, *, what: str) -> bytes:
+    """
+    A04: Đọc UploadFile theo stream và huỷ ngay khi vượt hạn mức.
+
+    Không dùng Content-Length để kiểm tra vì client hoàn toàn có thể khai sai;
+    chỉ có số byte đã đọc thật mới đáng tin.
+    """
+    blocks: list[bytes] = []
+    total = 0
+    while True:
+        block = await upload.read(_READ_BLOCK)
+        if not block:
+            break
+        total += len(block)
+        if max_bytes > 0 and total > max_bytes:
+            logger.warning("A04: %s vượt hạn mức %d bytes — từ chối", what, max_bytes)
+            raise HTTPException(
+                status_code=413,
+                detail=f"{what} vượt giới hạn {max_bytes // (1024 * 1024)} MB",
+            )
+        blocks.append(block)
+    return b"".join(blocks)
 
 
 async def generate_and_track_sas(

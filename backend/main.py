@@ -51,7 +51,7 @@ def _validate_startup_config() -> None:
     is_production = os.getenv("APP_ENV", "production").lower() not in ("development", "dev", "test")
     errors: list[str] = []
 
-    # Fix #1 — A02: JWT_SECRET đủ mạnh
+    # Fix #1 — A02/A04: JWT key material đúng thuật toán
     jwt_secret = os.getenv("JWT_SECRET", "")
     jwt_algo = os.getenv("JWT_ALGORITHM", "HS256")
     if jwt_algo.startswith("HS"):
@@ -64,6 +64,19 @@ def _validate_startup_config() -> None:
             errors.append(
                 f"[A02] JWT_SECRET quá ngắn ({len(jwt_secret)} ký tự, cần ≥ 32). "
                 "Tạo bằng: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
+    else:
+        # RS256/ES256: phải tách private (ký) và public (verify) — không dùng
+        # public key để encode.
+        if not os.getenv("JWT_PRIVATE_KEY", "").strip():
+            errors.append(
+                f"[A04] JWT_ALGORITHM={jwt_algo} nhưng JWT_PRIVATE_KEY chưa set "
+                "(cần private PEM để ký access token)."
+            )
+        if not os.getenv("JWT_PUBLIC_KEY", "").strip():
+            errors.append(
+                f"[A04] JWT_ALGORITHM={jwt_algo} nhưng JWT_PUBLIC_KEY chưa set "
+                "(cần public PEM để verify token)."
             )
 
     # Fix #2 — A05: CORS không wildcard
@@ -82,6 +95,17 @@ def _validate_startup_config() -> None:
             "[A05] COOKIE_SECURE=false trên production — refresh token cookie "
             "có thể bị gửi qua HTTP. Set COOKIE_SECURE=true khi đã có HTTPS."
         )
+
+    # A05: nếu dùng AI service remote thì phải có API key — thiếu key nghĩa là
+    # service AI đang mở không xác thực hoặc mọi request sẽ bị 403 âm thầm.
+    if os.getenv("LOCKSEND_AI_URL", "").strip():
+        ai_key = os.getenv("LOCKSEND_AI_API_KEY", "").strip()
+        if len(ai_key) < 16:
+            errors.append(
+                "[A05] LOCKSEND_AI_URL đã set nhưng LOCKSEND_AI_API_KEY thiếu hoặc "
+                "ngắn hơn 16 ký tự. Tạo bằng: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
 
     if errors:
         if is_production:
@@ -134,8 +158,15 @@ app = FastAPI(
     redoc_url="/redoc" if os.getenv("APP_ENV", "production") != "production" else None,
 )
 
+_IS_PRODUCTION = os.getenv("APP_ENV", "production").lower() not in ("development", "dev", "test")
+
 _RAW_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _RAW_ORIGINS.split(",") if o.strip()]
+
+# A05: Host header validation. Chỉ bật khi ALLOWED_HOSTS được set để không phá
+# healthcheck của platform (Railway gọi qua hostname nội bộ).
+_RAW_HOSTS = os.getenv("ALLOWED_HOSTS", "")
+ALLOWED_HOSTS = [h.strip() for h in _RAW_HOSTS.split(",") if h.strip()]
 
 app.include_router(auth_router)
 app.include_router(integrations_router)
@@ -155,6 +186,11 @@ app.add_middleware(
 
 # A05: Security headers (phải add sau CORS để không bị ghi đè)
 app.add_middleware(SecurityHeadersMiddleware)
+
+if ALLOWED_HOSTS:
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 
 # A05: Custom exception handler — ẩn internal error details trên production
@@ -215,21 +251,29 @@ async def health_deps():
             "mode": ai.get("mode", "unknown"),
         },
     }
-    if ai.get("ai_url"):
-        payload["locksend_ai"]["ai_url"] = ai["ai_url"]
-    if ai.get("error"):
-        payload["locksend_ai"]["error"] = ai["error"]
-    if ai.get("hint"):
-        payload["locksend_ai"]["hint"] = ai["hint"]
+    # A05: endpoint này public — hostname nội bộ và chuỗi lỗi là thông tin trinh
+    # sát hữu ích cho attacker, chỉ trả ở môi trường non-production.
+    if not _IS_PRODUCTION:
+        if ai.get("ai_url"):
+            payload["locksend_ai"]["ai_url"] = ai["ai_url"]
+        if ai.get("error"):
+            payload["locksend_ai"]["error"] = ai["error"]
+        if ai.get("hint"):
+            payload["locksend_ai"]["hint"] = ai["hint"]
+    elif ai.get("error"):
+        payload["locksend_ai"]["error"] = "unavailable"
     return payload
 
 
 @app.get("/", tags=["ops"])
 def root():
-    return {
+    payload = {
         "status": "ok",
         "service": "secure-file-sharing-backend",
-        "docs": "/docs",
         "health": "/health",
         "deps_health": "/health/deps",
     }
+    # A05: chỉ quảng bá /docs khi thực sự bật (production tắt OpenAPI).
+    if app.docs_url:
+        payload["docs"] = app.docs_url
+    return payload

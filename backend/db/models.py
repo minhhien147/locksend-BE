@@ -575,9 +575,13 @@ class TokenAiScoreSnapshot(Base):
     __table_args__ = (
         Index("ix_tass_created_at", "created_at"),
         Index("ix_tass_token_ref", "token_ref"),
+        Index("ix_tass_job_id", "job_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # Gắn snapshot với job Analyze đã tạo ra nó (NULL cho realtime scan và
+    # các job cũ trước migration o6p7q8r9s0t1).
+    job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     token_type: Mapped[str] = mapped_column(Text, nullable=False)
     token_ref: Mapped[str] = mapped_column(Text, nullable=False)
     user_id: Mapped[str | None] = mapped_column(

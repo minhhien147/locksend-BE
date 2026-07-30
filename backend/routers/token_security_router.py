@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import timezone
 from typing import Any, Literal
 
@@ -46,6 +47,11 @@ from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
 AI_ANALYZE_BATCH_SIZE = 50
+# Trần an toàn số SAS token nạp vào 1 lần Analyze. 0 = không giới hạn.
+AI_ANALYZE_SAS_MAX = int(os.getenv("AI_ANALYZE_SAS_MAX", "0"))
+# Trần riêng cho lookup enrich snapshot: bảng này gồm cả token đã hết hạn nên
+# luôn cần chặn để payload/RAM không phình theo lịch sử.
+METRIC_LOOKUP_SAS_MAX = int(os.getenv("METRIC_LOOKUP_SAS_MAX", "5000"))
 
 router = APIRouter(
     prefix="/auth/admin/token-security",
@@ -120,9 +126,29 @@ def _is_currently_skippable(metric: dict[str, Any]) -> bool:
     return recommendation == "ALLOW" or risk_level == "low" or risk_score < 40
 
 
+_metric_lookup_cache: tuple[float, dict[str, dict[str, Any]], dict[str, dict[str, Any]]] | None = None
+METRIC_LOOKUP_TTL_SEC = 10.0
+
+
 async def _build_metric_lookups(db: AsyncSession) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """
+    Lookup metric để làm giàu snapshot khi trả về FE.
+
+    Có cache TTL ngắn vì FE poll job detail mỗi 1.5s: nếu build lại mỗi lần thì
+    một job đang chạy sẽ liên tục quét full bảng RefreshToken + SasTokenRecord.
+    """
+    global _metric_lookup_cache
+    import time as _time
+
+    if _metric_lookup_cache is not None:
+        ts, cached_jwt, cached_sas = _metric_lookup_cache
+        if _time.monotonic() - ts < METRIC_LOOKUP_TTL_SEC:
+            return cached_jwt, cached_sas
+
     jwt_metrics = await token_security.get_jwt_token_metrics(db)
-    sas_metrics = await token_security.get_sas_token_metrics(db, include_expired=True, limit=500)
+    sas_metrics = await token_security.get_sas_token_metrics(
+        db, include_expired=True, limit=METRIC_LOOKUP_SAS_MAX or None
+    )
     jwt_by_user = {
         str(metric.get("user_id")): metric
         for metric in jwt_metrics
@@ -133,6 +159,7 @@ async def _build_metric_lookups(db: AsyncSession) -> tuple[dict[str, dict[str, A
         for metric in sas_metrics
         if metric.get("token_id")
     }
+    _metric_lookup_cache = (_time.monotonic(), jwt_by_user, sas_by_token)
     return jwt_by_user, sas_by_token
 
 
@@ -379,13 +406,15 @@ async def _run_ai_analysis_job(
                 else:
                     pairs.append((metric, result))
             try:
-                saved = await ai_realtime.bulk_save_manual_snapshots(db, pairs)
+                saved = await ai_realtime.bulk_save_manual_snapshots(
+                    db, pairs, job_id=job_id
+                )
             except Exception as save_err:
                 logger.warning("bulk save failed, fallback one-by-one: %s", save_err)
                 saved = 0
                 for m, r in pairs:
                     try:
-                        await ai_realtime.save_manual_snapshot(db, m, r)
+                        await ai_realtime.save_manual_snapshot(db, m, r, job_id=job_id)
                         saved += 1
                     except Exception as perr:
                         logger.warning("single save failed: %s", perr)
@@ -755,7 +784,12 @@ async def ai_analyze_start_job(
     if body.token_type in ("all", "jwt"):
         jwt_list = await token_security.get_jwt_token_metrics(db)
     if body.token_type in ("all", "sas"):
-        sas_list = await token_security.get_sas_token_metrics(db, include_expired=False)
+        # limit=None → quét TOÀN BỘ SAS còn hiệu lực, không chỉ 100 record mới nhất.
+        sas_list = await token_security.get_sas_token_metrics(
+            db,
+            include_expired=False,
+            limit=AI_ANALYZE_SAS_MAX or None,
+        )
 
     all_metrics = jwt_list + sas_list
     all_metrics.sort(key=lambda x: x["risk_score"], reverse=True)
@@ -851,7 +885,7 @@ async def ai_get_job_detail(
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     include_details: bool = Query(default=True),
-    snapshots_limit: int = Query(default=200, ge=0, le=500),
+    snapshots_limit: int = Query(default=200, ge=0, le=5000),
 ):
     """Xem trạng thái + (tùy chọn) danh sách snapshots của 1 AI analysis job."""
     _require_admin(current)
@@ -882,17 +916,27 @@ async def ai_get_job_detail(
     }
 
     if include_details and snapshots_limit > 0:
-        # Lấy snapshot nằm trong cửa sổ thời gian của job để tách report theo từng lần chạy.
-        snap_q = select(TokenAiScoreSnapshot).order_by(desc(TokenAiScoreSnapshot.created_at))
-        if job.created_at is not None:
-            from datetime import timedelta
-            window_start = job.created_at - timedelta(seconds=30)
-            snap_q = snap_q.where(TokenAiScoreSnapshot.created_at >= window_start)
-            if job.completed_at is not None:
-                window_end = job.completed_at + timedelta(seconds=30)
-                snap_q = snap_q.where(TokenAiScoreSnapshot.created_at <= window_end)
-        snap_q = snap_q.limit(snapshots_limit)
+        # Ưu tiên lấy snapshot theo job_id — mỗi lần Analyze là một report độc lập.
+        base_q = select(TokenAiScoreSnapshot).order_by(desc(TokenAiScoreSnapshot.created_at))
+        snap_q = base_q.where(TokenAiScoreSnapshot.job_id == str(job.id)).limit(snapshots_limit)
         snaps = (await db.execute(snap_q)).scalars().all()
+        payload["snapshots_source"] = "job_id"
+
+        if not snaps and job.created_at is not None:
+            # Job cũ (trước migration o6p7q8r9s0t1) chưa có job_id → suy theo cửa sổ thời gian.
+            from datetime import timedelta
+
+            legacy_q = base_q.where(
+                TokenAiScoreSnapshot.job_id.is_(None),
+                TokenAiScoreSnapshot.created_at >= job.created_at - timedelta(seconds=30),
+            )
+            if job.completed_at is not None:
+                legacy_q = legacy_q.where(
+                    TokenAiScoreSnapshot.created_at <= job.completed_at + timedelta(seconds=30)
+                )
+            snaps = (await db.execute(legacy_q.limit(snapshots_limit))).scalars().all()
+            payload["snapshots_source"] = "time_window"
+
         seen_refs: set[str] = set()
         deduped_snaps: list[TokenAiScoreSnapshot] = []
         for s in snaps:
@@ -900,7 +944,9 @@ async def ai_get_job_detail(
                 continue
             seen_refs.add(s.token_ref)
             deduped_snaps.append(s)
-        jwt_by_user, sas_by_token = await _build_metric_lookups(db)
+        jwt_by_user, sas_by_token = (
+            await _build_metric_lookups(db) if deduped_snaps else ({}, {})
+        )
         payload["snapshots"] = [
             _serialize_snapshot(
                 s,
@@ -908,6 +954,7 @@ async def ai_get_job_detail(
             )
             for s in deduped_snaps
         ]
+        payload["snapshots_total"] = len(deduped_snaps)
     return payload
 
 

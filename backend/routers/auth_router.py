@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid as _uuid_mod
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select, update
@@ -31,7 +32,8 @@ from routers._auth_helpers import (
     set_refresh_cookie,
     verify_password,
 )
-from services.login_guard import check_and_record_attempt, clear_attempts, record_failed_attempt
+from services.client_ip import client_ip as get_trusted_client_ip
+from services.login_guard import assert_login_allowed, clear_attempts, record_failed_attempt
 from routers.activity_router import router as activity_router
 from routers.profile_router import router as profile_router
 from routers.users_router import router as users_router
@@ -123,6 +125,30 @@ async def _get_or_create_google_user(
     if user:
         if info.name and not user.display_name:
             user.display_name = info.name
+        # A07: Gộp theo email chỉ an toàn khi account cũ đã tự chứng minh sở hữu
+        # email đó. Nếu chưa xác minh, đó có thể là account do người khác đăng ký
+        # trước để chiếm email (squatting) — Google đã xác minh email nên chủ
+        # Google mới là chủ thật: thu hồi credential mật khẩu + session của account cũ.
+        if user.email_verified_at is None:
+            had_password = user.password_hash is not None
+            user.password_hash = None
+            user.external_id = ext_id
+            await db.execute(
+                update(RefreshToken)
+                .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+                .values(revoked_at=datetime.now(timezone.utc))
+            )
+            logger.warning(
+                "SECURITY A07: tiếp nhận account email chưa xác minh qua Google — "
+                "user=%s email=%s had_password=%s",
+                user.id, user.email, had_password,
+            )
+            audit.log_event(
+                "security.google_claim_unverified_account",
+                user_id=user.id,
+                email=user.email,
+                had_password=had_password,
+            )
         return user
     user = User(
         external_id=ext_id,
@@ -180,12 +206,12 @@ async def login(
 ):
     """Đăng nhập bằng email + mật khẩu."""
     email = normalize_email(str(body.username))
-    client_ip = request.headers.get("X-Forwarded-For", "")
-    if not client_ip and request.client:
-        client_ip = request.client.host
+    # A07: Không dùng hop đầu của X-Forwarded-For — client tự đặt được, khiến
+    # lockout theo IP bị né hoàn toàn bằng cách gửi IP giả mỗi lần thử.
+    client_ip = get_trusted_client_ip(request)
 
     # A07: Kiểm tra brute-force lockout trước khi truy vấn DB
-    check_and_record_attempt(client_ip, email)
+    assert_login_allowed(client_ip, email)
 
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
 

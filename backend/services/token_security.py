@@ -195,6 +195,23 @@ async def get_jwt_token_metrics(
     for rt in tokens:
         by_user.setdefault(rt.user_id, []).append(rt)
 
+    # Access log count cho TẤT CẢ user trong 1 query (tránh N+1).
+    log_q = (
+        select(TokenAccessLog.user_id, func.count(TokenAccessLog.id))
+        .where(
+            TokenAccessLog.token_type == "jwt",
+            TokenAccessLog.created_at >= window_start,
+        )
+        .group_by(TokenAccessLog.user_id)
+    )
+    if user_id:
+        log_q = log_q.where(TokenAccessLog.user_id == user_id)
+    log_counts: dict[str, int] = {
+        str(uid): int(cnt or 0)
+        for uid, cnt in (await db.execute(log_q)).all()
+        if uid is not None
+    }
+
     results = []
     for uid, user_tokens in by_user.items():
         active = [
@@ -223,15 +240,8 @@ async def get_jwt_token_metrics(
             if times and (times[-1] - times[0]).total_seconds() < 120:
                 mass_revoke = True
 
-        # Access log per-hour count from TokenAccessLog
-        log_count_result = await db.execute(
-            select(func.count(TokenAccessLog.id)).where(
-                TokenAccessLog.user_id == uid,
-                TokenAccessLog.token_type == "jwt",
-                TokenAccessLog.created_at >= window_start,
-            )
-        )
-        log_count = log_count_result.scalar() or 0
+        # Access log per-hour count (đã prefetch batch ở trên)
+        log_count = log_counts.get(uid, 0)
         accesses_per_hour = log_count / max(window_hours, 1)
 
         oldest_active = min(
@@ -279,13 +289,20 @@ async def get_jwt_token_metrics(
 async def get_sas_token_metrics(
     db: AsyncSession,
     *,
-    limit: int = 100,
+    limit: int | None = 100,
     include_expired: bool = False,
     include_revoked: bool = True,
 ) -> list[dict[str, Any]]:
-    """Metrics các SAS token đã cấp."""
+    """
+    Metrics các SAS token đã cấp.
+
+    limit=None → lấy toàn bộ record khớp filter (dùng cho bulk AI analyze,
+    để AI không bỏ sót token nào).
+    """
     now = _utc_now()
-    q = select(SasTokenRecord).order_by(SasTokenRecord.created_at.desc()).limit(limit)
+    q = select(SasTokenRecord).order_by(SasTokenRecord.created_at.desc())
+    if limit is not None:
+        q = q.limit(limit)
     if not include_expired:
         q = q.where(SasTokenRecord.expires_at > now)
     if not include_revoked:
@@ -294,19 +311,26 @@ async def get_sas_token_metrics(
     records = (await db.execute(q)).scalars().all()
     results = []
 
+    # Download rate 1h cho TẤT CẢ token trong 1 query (tránh N+1).
+    # Chỉ gom log trong 1 giờ gần nhất nên result set luôn nhỏ, không phụ
+    # thuộc số lượng SAS record.
+    window_start = now - timedelta(hours=1)
+    rate_rows = (await db.execute(
+        select(TokenAccessLog.token_ref, func.count(TokenAccessLog.id))
+        .where(
+            TokenAccessLog.token_type == "sas",
+            TokenAccessLog.created_at >= window_start,
+        )
+        .group_by(TokenAccessLog.token_ref)
+    )).all()
+    access_rates: dict[str, int] = {
+        str(ref): int(cnt or 0) for ref, cnt in rate_rows if ref is not None
+    }
+
     for rec in records:
         token_age_hours = _hours_since(rec.created_at)
         is_expired = _aware(rec.expires_at) <= now
-
-        # Tính download rate từ access logs
-        window_start = now - timedelta(hours=1)
-        rate_result = await db.execute(
-            select(func.count(TokenAccessLog.id)).where(
-                TokenAccessLog.token_ref == rec.token_id,
-                TokenAccessLog.created_at >= window_start,
-            )
-        )
-        accesses_last_hour = rate_result.scalar() or 0
+        accesses_last_hour = access_rates.get(rec.token_id, 0)
 
         score, reasons = _score_sas(
             ip_count=rec.unique_ip_count,

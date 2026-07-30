@@ -20,7 +20,16 @@ from schemas.files import MultipartFinalizeRequest, MultipartInitResponse, SasRe
 from services.azure_storage import CONTAINER_NAME, get_blob_service_client
 from services.vault_storage import assert_vault_quota, resolve_folder
 
-from routers._upload_helpers import generate_and_track_sas, get_client_ip, sanitize_filename
+from routers._upload_helpers import (
+    MAX_CHUNK_UPLOAD_BYTES,
+    MAX_SINGLE_UPLOAD_BYTES,
+    azure_encryption_blob_metadata,
+    generate_and_track_sas,
+    get_client_ip,
+    read_upload_capped,
+    sanitize_display_filename,
+    sanitize_filename,
+)
 from routers.files_router import router as files_router
 from routers.download_router import router as download_router
 
@@ -29,6 +38,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["upload"], dependencies=[Depends(require_verified_email)])
 router.include_router(files_router)
 router.include_router(download_router)
+
+
+def _assert_session_usable(session: UploadSession) -> None:
+    """
+    A04: Session multipart phải còn hiệu lực. Không kiểm tra thì blob_name bị lộ
+    có thể được dùng để stage/commit lại vô thời hạn sau khi session hết hạn.
+    """
+    if session.status == "finalized":
+        raise HTTPException(status_code=409, detail="Upload session đã được finalize")
+
+    expires = session.expires_at
+    if expires is None:
+        return
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="Upload session đã hết hạn")
 
 
 # ── Single-shot upload ────────────────────────────────────────────────────────
@@ -52,7 +78,9 @@ async def upload_file(
     # A03: Sanitize tên file blob để tránh path traversal
     safe_blob_filename = sanitize_filename(file.filename or "upload")
     blob_name = f"{uuid.uuid4()}/{safe_blob_filename}"
-    ciphertext = await file.read()
+    # A04: đọc có hạn mức — file.read() không giới hạn cho phép 1 request nhiều GB
+    # chiếm hết RAM của worker.
+    ciphertext = await read_upload_capped(file, MAX_SINGLE_UPLOAD_BYTES, what="File upload")
     file_size = len(ciphertext)
 
     if mode == "vault":
@@ -61,7 +89,10 @@ async def upload_file(
         recipients_json = None
 
     ciphertext_checksum = hashlib.sha256(ciphertext).hexdigest()
-    metadata_b64 = b64mod.b64encode(metadata_json.encode("utf-8")).decode("ascii")
+    blob_meta = azure_encryption_blob_metadata(
+        metadata_json,
+        ciphertext_checksum=ciphertext_checksum,
+    )
 
     try:
         client = get_blob_service_client()
@@ -69,10 +100,7 @@ async def upload_file(
         blob_client.upload_blob(
             ciphertext,
             overwrite=True,
-            metadata={
-                "encryption_metadata_b64": metadata_b64,
-                "ciphertext_checksum": ciphertext_checksum,
-            },
+            metadata=blob_meta,
         )
     except Exception as exc:
         logger.exception("Upload failed for user %s: %s", current.id, exc)
@@ -83,7 +111,10 @@ async def upload_file(
     except json.JSONDecodeError:
         meta = {}
 
-    original_filename = meta.get("filename") or file.filename or blob_name.split("/")[-1]
+    # A03: tên hiển thị đi vào Content-Disposition khi tải về — phải sạch CR/LF
+    original_filename = sanitize_display_filename(
+        meta.get("filename") or file.filename or blob_name.split("/")[-1]
+    )
     encryption_alg = meta.get("encryption_alg") or meta.get("algorithm") or "X25519+HKDF+AES-256-GCM"
     meta["storage_mode"] = mode
 
@@ -106,11 +137,13 @@ async def upload_file(
     try:
         client = get_blob_service_client()
         blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
-        blob_client.set_blob_metadata({
-            "encryption_metadata_b64": metadata_b64,
-            "ciphertext_checksum": ciphertext_checksum,
-            "file_id": file_record.id,
-        })
+        blob_client.set_blob_metadata(
+            azure_encryption_blob_metadata(
+                metadata_json,
+                file_id=file_record.id,
+                ciphertext_checksum=ciphertext_checksum,
+            )
+        )
     except Exception as exc:
         logger.warning("set_blob_metadata(file_id) failed: %s", exc)
 
@@ -229,9 +262,12 @@ async def multipart_upload_chunk(
     ).scalar_one_or_none()
     if session is None:
         raise HTTPException(status_code=404, detail="Upload session không tồn tại")
+    _assert_session_usable(session)
 
     block_id = b64mod.b64encode(f"{chunk_index:08d}".encode()).decode()
-    data = await chunk.read()
+    # A04: chặn chunk khổng lồ — mỗi chunk được đọc trọn vào RAM.
+    chunk_cap = min(MAX_CHUNK_UPLOAD_BYTES, max(session.chunk_size_bytes * 2, 8 * 1024 * 1024))
+    data = await read_upload_capped(chunk, chunk_cap, what="Chunk")
     if not data:
         raise HTTPException(status_code=400, detail="Chunk rỗng")
 
@@ -270,6 +306,18 @@ async def multipart_finalize(
     ).scalar_one_or_none()
     if session is None:
         raise HTTPException(status_code=404, detail="Upload session không tồn tại")
+    _assert_session_usable(session)
+
+    # A08: client không được khai nhiều chunk hơn số block đã thực sự stage —
+    # nếu không, blob commit sẽ không khớp chunk layout dùng khi tải về.
+    if body.chunk_count > (session.uploaded_chunk_count or 0):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"chunk_count={body.chunk_count} lớn hơn số chunk đã upload "
+                f"({session.uploaded_chunk_count or 0})"
+            ),
+        )
 
     block_ids = [b64mod.b64encode(f"{i:08d}".encode()).decode() for i in range(body.chunk_count)]
 
@@ -279,17 +327,15 @@ async def multipart_finalize(
     except (json.JSONDecodeError, AttributeError):
         has_chunk_checksums = False
 
-    metadata_b64 = b64mod.b64encode(body.metadata_json.encode("utf-8")).decode("ascii")
-
     try:
         client = get_blob_service_client()
         blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
         blob_client.commit_block_list(
             block_ids,
-            metadata={
-                "encryption_metadata_b64": metadata_b64,
-                "has_chunk_checksums": str(has_chunk_checksums).lower(),
-            },
+            metadata=azure_encryption_blob_metadata(
+                body.metadata_json,
+                has_chunk_checksums=has_chunk_checksums,
+            ),
         )
     except Exception as exc:
         logger.exception("Commit block list failed: %s", exc)
@@ -300,14 +346,30 @@ async def multipart_finalize(
     except json.JSONDecodeError:
         meta = {}
 
-    original_filename = body.original_filename or meta.get("filename") or blob_name.split("/")[-1]
+    # A03: tên hiển thị đi vào Content-Disposition khi tải về — phải sạch CR/LF
+    original_filename = sanitize_display_filename(
+        body.original_filename or meta.get("filename") or blob_name.split("/")[-1]
+    )
     mode = (body.storage_mode or "share").strip().lower()
     if mode not in ("share", "vault"):
         raise HTTPException(status_code=422, detail="storage_mode phải là share hoặc vault")
 
-    file_size = body.file_size_bytes or meta.get("file_size_bytes", 0) or meta.get("fileSize", 0)
+    # A04/A08: lấy kích thước thật từ Azure. body.file_size_bytes do client khai
+    # nên có thể báo 1 byte cho blob nhiều GB để né quota vault.
+    declared_size = int(body.file_size_bytes or meta.get("file_size_bytes", 0) or meta.get("fileSize", 0) or 0)
+    try:
+        file_size = int(blob_client.get_blob_properties().size)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_blob_properties sau finalize thất bại, dùng số client khai: %s", exc)
+        file_size = declared_size
+    if declared_size and file_size != declared_size:
+        logger.warning(
+            "A08: file_size_bytes client khai (%d) khác kích thước blob thật (%d) blob=%s",
+            declared_size, file_size, blob_name,
+        )
+
     if mode == "vault":
-        await assert_vault_quota(db, current.id, int(file_size))
+        await assert_vault_quota(db, current.id, file_size)
         await resolve_folder(db, current.id, body.folder_id)
 
     meta["storage_mode"] = mode
@@ -318,7 +380,7 @@ async def multipart_finalize(
         blob_name=blob_name,
         original_filename=original_filename,
         content_type=body.content_type or meta.get("content_type"),
-        file_size_bytes=int(file_size),
+        file_size_bytes=file_size,
         encryption_alg=body.encryption_alg,
         chunk_size_bytes=body.chunk_size_bytes,
         chunk_count=body.chunk_count,
@@ -367,7 +429,7 @@ async def multipart_finalize(
         file_id=file_record.id,
         blob_name=blob_name,
         original_filename=original_filename,
-        file_size_bytes=body.file_size_bytes or meta.get("file_size_bytes", 0),
+        file_size_bytes=file_size,
         upload_type="multipart",
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
@@ -376,11 +438,13 @@ async def multipart_finalize(
     try:
         client2 = get_blob_service_client()
         blob_client2 = client2.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
-        blob_client2.set_blob_metadata({
-            "encryption_metadata_b64": metadata_b64,
-            "has_chunk_checksums": str(has_chunk_checksums).lower(),
-            "file_id": file_record.id,
-        })
+        blob_client2.set_blob_metadata(
+            azure_encryption_blob_metadata(
+                body.metadata_json,
+                file_id=file_record.id,
+                has_chunk_checksums=has_chunk_checksums,
+            )
+        )
     except Exception as exc:
         logger.warning("set_blob_metadata(file_id) multipart failed: %s", exc)
 

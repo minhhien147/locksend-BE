@@ -39,7 +39,7 @@ sqlalchemy[asyncio]==2.0.41
 # [standard] kéo theo uvloop + httptools (Linux) — event loop và HTTP parser viết
 # bằng C, giảm rõ CPU/latency mỗi request so với asyncio + h11 thuần Python.
 uvicorn[standard]==0.42.0
-python-dotenv
+python-dotenv==1.2.2
 # Gmail OAuth2 (chỉ cần khi EMAIL_BACKEND=gmail_oauth2): pip install google-auth
 # google-auth==2.40.3
 # LockSend AI (sklearn/shap): pip install -r requirements-ai.txt — hoặc set LOCKSEND_AI_URL trên Railway

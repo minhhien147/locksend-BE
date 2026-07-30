@@ -12,7 +12,7 @@ from threading import Lock
 import audit
 from azure.storage.blob import BlobClient
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ from services.chunk_layout import encrypted_chunk_byte_length, encrypted_chunk_o
 
 from routers._upload_helpers import (
     authorize_file_download,
+    content_disposition_attachment,
     ensure_sas_download_allowed,
     metadata_for_file,
 )
@@ -57,6 +58,24 @@ def _check_download_rate(user_id: str, file_id: str | None) -> None:
             )
         recent.append(now)
         _dl_counts[key] = recent
+
+
+def _check_chunk_rate(user_id: str, file_id: str, chunk_count: int) -> None:
+    """
+    A04: File chunked cần chunk_count request để tải xong, nên không thể dùng
+    chung hạn mức với download nguyên file. Cho phép _DOWNLOAD_MAX lượt tải
+    trọn file, quy đổi thành số request chunk.
+    """
+    from services.rate_limit import check_rate
+
+    budget = max(1, _DOWNLOAD_MAX) * max(1, chunk_count)
+    check_rate(
+        "download_chunk",
+        f"{user_id}:{file_id}",
+        limit=budget,
+        window=_DOWNLOAD_WINDOW,
+        detail=f"Vượt giới hạn tải chunk ({budget} request/{_DOWNLOAD_WINDOW}s). Thử lại sau.",
+    )
 
 
 # ── Ciphertext by SAS ─────────────────────────────────────────────────────────
@@ -94,10 +113,16 @@ async def download_ciphertext_by_sas(
     if file_row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy file")
 
+    # A04: Hạn mức phải áp ở đây, không chỉ ở /download-log — client có thể bỏ
+    # hẳn bước ghi log và tải không giới hạn qua route proxy này.
+    _check_download_rate(current.id, file_row.id)
+
     try:
         blob_client = BlobClient.from_blob_url(body.sas_url)
-        data = blob_client.download_blob().readall()
+        # A06/A10: stream thay vì readall() — tránh OOM khi proxy file lớn.
+        downloader = blob_client.download_blob()
         blob_meta = blob_client.get_blob_properties().metadata or {}
+        content_length = getattr(downloader, "size", None)
     except Exception as exc:
         logger.exception("download_ciphertext_by_sas failed: %s", exc)
         raise HTTPException(status_code=502, detail="Không tải được file từ storage")
@@ -110,12 +135,20 @@ async def download_ciphertext_by_sas(
 
     headers = {
         "X-File-Id": file_row.id,
-        "Content-Disposition": f'attachment; filename="{file_row.original_filename}.lsc"',
+        # A03: original_filename có nguồn từ client — dựng header qua helper để
+        # CR/LF không chèn được header mới.
+        "Content-Disposition": content_disposition_attachment(f"{file_row.original_filename}.lsc"),
     }
     if metadata_b64:
         headers["X-Encryption-Metadata-B64"] = metadata_b64
+    if content_length is not None:
+        headers["Content-Length"] = str(content_length)
 
-    return Response(content=data, media_type="application/octet-stream", headers=headers)
+    return StreamingResponse(
+        downloader.chunks(),
+        media_type="application/octet-stream",
+        headers=headers,
+    )
 
 
 # ── Chunk download ────────────────────────────────────────────────────────────
@@ -143,6 +176,9 @@ async def download_ciphertext_chunk(
     chunk_count = metadata.get("chunkCount") or metadata.get("chunk_count")
     if chunk_index >= int(chunk_count):
         raise HTTPException(status_code=400, detail="chunk_index vượt chunk_count")
+
+    # A04: hạn mức riêng cho route chunk (xem _check_chunk_rate)
+    _check_chunk_rate(current.id, file_row.id, int(chunk_count))
 
     offset = encrypted_chunk_offset(metadata, chunk_index)
     length = encrypted_chunk_byte_length(metadata, chunk_index)
@@ -191,6 +227,11 @@ async def _persist_download_log(
         file_row = (await db.execute(select(FileModel).where(FileModel.id == file_id))).scalar_one_or_none()
     if file_row is None and blob_name:
         file_row = (await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))).scalar_one_or_none()
+
+    # A01: không có bước này thì bất kỳ user nào cũng ghi được DownloadLog cho
+    # file của người khác, làm nhiễu audit và kích hoạt cảnh báo sai cho owner.
+    if file_row is not None:
+        await authorize_file_download(db, file_row, current)
 
     blob_logged = file_row.blob_name if file_row else (blob_name or file_id or "unknown")
     orig_logged = file_row.original_filename if file_row else "unknown"
