@@ -547,7 +547,7 @@ export const vi = {
       topRisk: "Top rủi ro (rule engine)",
       aiAnalyzeTitle: "Phân tích bằng LockSend AI",
       aiAnalyzeDesc:
-        "Random Forest (CIC-IDS2017) · SHAP explanation · Top 20 token theo risk score",
+        "Random Forest · SHAP explanation · Top 20 token theo risk score",
       aiRemoteNotConnected: "AI remote chưa kết nối được",
       aiNotReadyHint: "model chưa sẵn sàng — set LOCKSEND_AI_URL trên Railway BE",
       analyzing: "Đang phân tích AI…",

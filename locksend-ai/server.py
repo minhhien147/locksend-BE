@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import sys
 import warnings
 from collections.abc import AsyncIterator
@@ -29,6 +30,9 @@ from predict import analyze_access, analyze_batch_access, load_bundle
 
 API_KEY = os.getenv("LOCKSEND_AI_API_KEY", "").strip()
 _IS_PRODUCTION = os.getenv("APP_ENV", "production").lower() not in ("development", "dev", "test")
+
+# A04: Trần số item cho /analyze/batch
+MAX_BATCH_ITEMS = int(os.getenv("LOCKSEND_AI_MAX_BATCH_ITEMS", "512"))
 
 # Fix #5 — Bắt buộc API key trên production
 if _IS_PRODUCTION:
@@ -118,7 +122,9 @@ def _verify_api_key(authorization: str | None = Header(default=None)) -> None:
         return
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Bearer token")
-    if authorization[7:] != API_KEY:
+    # A07: so sánh constant-time để giảm timing side-channel.
+    presented = authorization[7:]
+    if len(presented) != len(API_KEY) or not secrets.compare_digest(presented, API_KEY):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 
@@ -129,7 +135,9 @@ class AnalyzeRequest(BaseModel):
 
 
 class BatchAnalyzeRequest(BaseModel):
-    items: list[dict[str, float]]
+    # A04: Không giới hạn số item thì một request đủ để đốt hết CPU/RAM của
+    # service (SHAP + sklearn chạy đồng bộ) — DoS chỉ bằng một POST.
+    items: list[dict[str, float]] = Field(max_length=MAX_BATCH_ITEMS)
     explain_top_n: int = Field(
         default=10,
         ge=0,
@@ -148,13 +156,28 @@ def health_live() -> dict[str, str]:
 def health() -> dict[str, Any]:
     try:
         bundle = _get_bundle()
+        metrics = dict(bundle.get("metrics") or {})
+        # dataset / description nằm top-level bundle (train.py) — merge vào metrics cho FE
+        if "dataset" not in metrics and bundle.get("dataset"):
+            metrics["dataset"] = bundle["dataset"]
+        if "dataset_description" not in metrics and bundle.get("dataset_description"):
+            metrics["dataset_description"] = bundle["dataset_description"]
+        if "combine_profiles" not in metrics and bundle.get("combine_profiles"):
+            metrics["combine_profiles"] = bundle["combine_profiles"]
         return {
             "ready": True,
             "version": bundle.get("version", "unknown"),
             "trained_at": bundle.get("trained_at"),
-            "metrics": bundle.get("metrics", {}),
+            "dataset": metrics.get("dataset") or bundle.get("dataset"),
+            "dataset_description": metrics.get("dataset_description")
+            or bundle.get("dataset_description"),
+            "metrics": metrics,
         }
     except Exception as exc:
+        # A05: /health không cần API key — chuỗi lỗi chứa đường dẫn filesystem và
+        # cấu hình nội bộ, chỉ trả chi tiết ở môi trường non-production.
+        if _IS_PRODUCTION:
+            return {"ready": False, "error": "model_unavailable"}
         return {
             "ready": False,
             "error": str(exc),

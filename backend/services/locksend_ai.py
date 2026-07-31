@@ -245,12 +245,22 @@ async def health() -> dict[str, Any]:
     try:
         _ensure_loaded()
         assert _bundle is not None
+        metrics = dict(_bundle.get("metrics") or {})
+        if "dataset" not in metrics and _bundle.get("dataset"):
+            metrics["dataset"] = _bundle["dataset"]
+        if "dataset_description" not in metrics and _bundle.get("dataset_description"):
+            metrics["dataset_description"] = _bundle["dataset_description"]
+        if "combine_profiles" not in metrics and _bundle.get("combine_profiles"):
+            metrics["combine_profiles"] = _bundle["combine_profiles"]
         return {
             "ready": True,
             "mode": "local",
             "version": _bundle.get("version", "unknown"),
             "trained_at": _bundle.get("trained_at"),
-            "metrics": _bundle.get("metrics", {}),
+            "dataset": metrics.get("dataset") or _bundle.get("dataset"),
+            "dataset_description": metrics.get("dataset_description")
+            or _bundle.get("dataset_description"),
+            "metrics": metrics,
             "model_path": os.path.join(LOCKSEND_AI_DIR, "models", "model.pkl"),
             "ai_dir": LOCKSEND_AI_DIR,
         }

@@ -122,6 +122,8 @@ interface AiHealth {
   ai_url?: string;
   version?: string;
   trained_at?: string;
+  dataset?: string;
+  dataset_description?: string;
   metrics?: {
     accuracy?: number;
     f1?: number;
@@ -129,10 +131,44 @@ interface AiHealth {
     precision?: number;
     recall?: number;
     train_size?: number;
+    dataset?: string;
+    dataset_description?: string;
+    combine_profiles?: string[];
   };
   error?: string;
   ai_dir?: string;
   hint?: string;
+}
+
+const DATASET_LABELS: Record<string, string> = {
+  trustlab: "TRUST Lab 2026 (API / credential attacks)",
+  idsiot2024: "IDSIoT2024",
+  ciciot2023: "CICIoT2023",
+  uwf_zeek24: "UWF-ZeekData24",
+  gotham2025: "Gotham 2025",
+  cic2018: "CIC-IDS2018",
+  cic2017: "CIC-IDS2017 (brute-force, DoS, Bot, DDoS)",
+  combined: "Combined",
+};
+
+function formatAiDatasetLabel(health: AiHealth): string {
+  const m = health.metrics;
+  if (m?.combine_profiles?.length) {
+    const parts = m.combine_profiles.map((p) => DATASET_LABELS[p] ?? p);
+    return `combined (${parts.join(" + ")})`;
+  }
+  const description = m?.dataset_description || health.dataset_description;
+  if (description) return description;
+  const dataset = m?.dataset || health.dataset;
+  if (dataset) return DATASET_LABELS[dataset] ?? dataset;
+  const v = (health.version ?? "").toLowerCase();
+  if (v.includes("trustlab")) return DATASET_LABELS.trustlab;
+  if (v.includes("combined")) return DATASET_LABELS.combined;
+  if (v.includes("idsiot")) return DATASET_LABELS.idsiot2024;
+  if (v.includes("ciciot")) return DATASET_LABELS.ciciot2023;
+  if (v.includes("cic2018")) return DATASET_LABELS.cic2018;
+  if (v.includes("cic2017")) return DATASET_LABELS.cic2017;
+  return health.version ?? "unknown";
 }
 
 interface ShapFeature {
@@ -1283,7 +1319,7 @@ export default function AdminTokenSecurityPage() {
           {aiHealth && (
             <span className="text-xs text-slate-600 dark:text-white/35">
               {aiReady
-                ? `v${aiHealth.version ?? "?"} · ROC-AUC ${((aiHealth.metrics?.roc_auc ?? 0) * 100).toFixed(1)}%`
+                ? `v${aiHealth.version ?? "?"} · ${formatAiDatasetLabel(aiHealth)}`
                 : t("admin.tokenSecurity.modelNotReady")}
             </span>
           )}
@@ -1400,8 +1436,8 @@ export default function AdminTokenSecurityPage() {
             </div>
           )}
 
-          {/* LockSend AI model info (collapsed by default) */}
-          {aiHealth && aiReady && aiHealth.metrics && (
+          {/* LockSend AI model info (collapsed by default) — không hiện lab accuracy % */}
+          {aiHealth && aiReady && (
             <div className={surfaceCard}>
               <button
                 type="button"
@@ -1411,33 +1447,47 @@ export default function AdminTokenSecurityPage() {
               >
                 <span className="text-xs font-semibold text-emerald-300">Model info</span>
                 <span className="text-[11px] text-slate-500 dark:text-white/35 truncate">
-                  Random Forest · {aiHealth.version}
-                  {aiHealth.metrics.roc_auc != null
-                    ? ` · ROC-AUC ${(aiHealth.metrics.roc_auc * 100).toFixed(1)}%`
-                    : ""}
+                  Random Forest · {aiHealth.version ?? "?"} · {formatAiDatasetLabel(aiHealth)}
                 </span>
                 <span className="ml-auto text-slate-500 dark:text-white/30 text-xs shrink-0">
                   {modelInfoOpen ? "▾" : "▸"}
                 </span>
               </button>
               {modelInfoOpen && (
-                <div className={`px-4 pb-4 pt-1 border-t ${admin.divider}`}>
-                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
-                    {[
-                      { label: "Accuracy",  val: aiHealth.metrics.accuracy },
-                      { label: "F1",        val: aiHealth.metrics.f1 },
-                      { label: "ROC-AUC",   val: aiHealth.metrics.roc_auc },
-                      { label: "Precision", val: aiHealth.metrics.precision },
-                      { label: "Recall",    val: aiHealth.metrics.recall },
-                    ].map(({ label, val }) => (
-                      <div key={label} className="text-center">
-                        <p className="text-sm font-bold text-emerald-300">{val != null ? (val * 100).toFixed(1) + "%" : "—"}</p>
-                        <p className="text-[10px] text-slate-500 dark:text-white/30 mt-0.5">{label}</p>
+                <div className={`px-4 pb-4 pt-1 border-t ${admin.divider} space-y-2`}>
+                  <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
+                    <div className="flex gap-2">
+                      <dt className="text-slate-500 dark:text-white/30 shrink-0">Type</dt>
+                      <dd className="text-slate-700 dark:text-white/55">Random Forest (+ SHAP)</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="text-slate-500 dark:text-white/30 shrink-0">Version</dt>
+                      <dd className="text-slate-700 dark:text-white/55 truncate">{aiHealth.version ?? "—"}</dd>
+                    </div>
+                    <div className="flex gap-2 sm:col-span-2">
+                      <dt className="text-slate-500 dark:text-white/30 shrink-0">Dataset</dt>
+                      <dd className="text-slate-700 dark:text-white/55">{formatAiDatasetLabel(aiHealth)}</dd>
+                    </div>
+                    {aiHealth.metrics?.train_size != null && (
+                      <div className="flex gap-2">
+                        <dt className="text-slate-500 dark:text-white/30 shrink-0">Train size</dt>
+                        <dd className="text-slate-700 dark:text-white/55">
+                          {aiHealth.metrics.train_size.toLocaleString()} samples
+                        </dd>
                       </div>
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-slate-400 dark:text-white/20 mt-3">
-                    Train: {aiHealth.metrics.train_size?.toLocaleString()} samples · Dataset: CIC-IDS2017 (brute-force, DoS, Bot, DDoS)
+                    )}
+                    {aiHealth.trained_at && (
+                      <div className="flex gap-2">
+                        <dt className="text-slate-500 dark:text-white/30 shrink-0">Trained</dt>
+                        <dd className="text-slate-700 dark:text-white/55">
+                          {new Date(aiHealth.trained_at).toLocaleString()}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                  <p className="text-[10px] text-slate-400 dark:text-white/25 leading-relaxed">
+                    Hỗ trợ quyết định cùng rule engine — không dùng số accuracy lab làm bằng chứng hiệu năng trên
+                    traffic LockSend thật.
                   </p>
                 </div>
               )}

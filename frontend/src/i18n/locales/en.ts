@@ -545,7 +545,7 @@ export const en = {
       topRisk: "Top risk (rule engine)",
       aiAnalyzeTitle: "Analyze with LockSend AI",
       aiAnalyzeDesc:
-        "Random Forest (CIC-IDS2017) · SHAP explanation · Top 20 tokens by risk score",
+        "Random Forest · SHAP explanation · Top 20 tokens by risk score",
       aiRemoteNotConnected: "Remote AI not connected",
       aiNotReadyHint: "model not ready — set LOCKSEND_AI_URL on Railway BE",
       analyzing: "Running AI analysis…",

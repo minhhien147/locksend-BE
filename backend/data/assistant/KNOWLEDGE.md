@@ -30,7 +30,7 @@
 ## Admin
 - **Users**: quản lý role / storage plan.
 - **Nhật ký (Activity)**: giám sát upload / download / API theo user.
-- **Token Security**: rule engine + LockSend AI (Random Forest, CIC-IDS2017) phân tích JWT/SAS; AI Report có lọc JWT/SAS/decision; File Activity xem upload & download theo file.
+- **Token Security**: rule engine + LockSend AI (Random Forest, dataset theo model đang load — vd. TRUST Lab 2026) phân tích JWT/SAS; AI Report có lọc JWT/SAS/decision; File Activity xem upload & download theo file.
 - VirusTotal (nếu bật): sau giải mã chỉ gửi SHA-256 plaintext — không gửi file.
 
 ## Quy tắc trả lời

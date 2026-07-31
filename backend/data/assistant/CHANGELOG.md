@@ -4,6 +4,7 @@
 > Không viết dài; chỉ những gì user/admin cần biết để dùng đúng.
 
 ## 2026-07-31
+- Admin → Token Security → **Model info**: hiện đúng dataset model đang load (vd. TRUST Lab 2026), không còn nhãn cứng CIC-IDS2017.
 - Admin → **Nhật ký**: xem log upload/download/API theo user (lọc loại, email, ngày).
 - Admin → Token Security → **AI Report**: lọc theo JWT/SAS, decision (ALLOW/MONITOR/REVIEW/REVOKE), tìm email/blob; ưu tiên hiện REVOKE/REVIEW khi list dài.
 - Admin → **File Activity**: ngoài download, có top file theo **upload** và recent uploads trong chi tiết file.
