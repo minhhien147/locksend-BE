@@ -171,6 +171,19 @@ function formatAiDatasetLabel(health: AiHealth): string {
   return health.version ?? "unknown";
 }
 
+function formatAiNotReadyHint(health: AiHealth | null | undefined, fallback: string): string {
+  if (!health) return fallback;
+  if (health.hint) return health.hint;
+  if (health.mode === "remote") {
+    if (health.error === "model_unavailable") {
+      return "model_unavailable — upload model.pkl (+ .sha256) lên Volume AI hoặc set LOCKSEND_AI_MODEL_URL";
+    }
+    return health.error || fallback;
+  }
+  if (health.ai_dir) return `cd ${health.ai_dir} && python train.py`;
+  return fallback;
+}
+
 interface ShapFeature {
   feature: string;
   impact: number;
@@ -1338,7 +1351,7 @@ export default function AdminTokenSecurityPage() {
         {/* Hint nếu AI chưa sẵn */}
         {aiHealth && !aiReady && (
           <span className="text-xs text-amber-300/60 ml-auto hidden sm:block">
-            {aiHealth.hint ?? `cd ${aiHealth.ai_dir} && python train.py`}
+            {formatAiNotReadyHint(aiHealth, t("admin.tokenSecurity.aiNotReadyHint"))}
           </span>
         )}
       </div>
@@ -2153,7 +2166,7 @@ export default function AdminTokenSecurityPage() {
               </p>
               {aiHealth && !aiHealth.ready && (
                 <p className="text-xs text-slate-500 dark:text-white/30 mt-2 font-mono">
-                  {aiHealth.hint ?? `cd ${aiHealth.ai_dir} && python train.py`}
+                  {formatAiNotReadyHint(aiHealth, t("admin.tokenSecurity.aiNotReadyHint"))}
                 </p>
               )}
             </div>

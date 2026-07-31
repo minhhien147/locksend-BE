@@ -228,6 +228,11 @@ async def _remote_health() -> dict[str, Any]:
         data = res.json()
         data["mode"] = "remote"
         data["ai_url"] = LOCKSEND_AI_URL
+        if not data.get("ready") and not data.get("hint"):
+            data["hint"] = (
+                "AI service online nhưng model chưa load — kiểm tra Volume model.pkl "
+                "và SHA (LOCKSEND_AI_MODEL_SHA256 / model.pkl.sha256)"
+            )
         return data
     except httpx.HTTPError as exc:
         return {

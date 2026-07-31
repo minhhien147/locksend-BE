@@ -174,14 +174,17 @@ def health() -> dict[str, Any]:
             "metrics": metrics,
         }
     except Exception as exc:
-        # A05: /health không cần API key — chuỗi lỗi chứa đường dẫn filesystem và
-        # cấu hình nội bộ, chỉ trả chi tiết ở môi trường non-production.
+        # A05: /health không cần API key — không lộ đường dẫn/stack ở production.
+        hint = (
+            "Ensure model.pkl on Volume (LOCKSEND_AI_MODELS_DIR) matching models/model.pkl.sha256, "
+            "or set LOCKSEND_AI_MODEL_URL + LOCKSEND_AI_MODEL_SHA256"
+        )
         if _IS_PRODUCTION:
-            return {"ready": False, "error": "model_unavailable"}
+            return {"ready": False, "error": "model_unavailable", "hint": hint}
         return {
             "ready": False,
             "error": str(exc),
-            "hint": "Set LOCKSEND_AI_MODEL_URL hoặc LOCKSEND_AI_MODELS_DIR + model.pkl",
+            "hint": hint,
         }
 
 
