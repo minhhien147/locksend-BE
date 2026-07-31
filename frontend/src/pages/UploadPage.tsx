@@ -311,7 +311,11 @@ export default function UploadPage() {
                 <Badge tone="warning">{t("upload.chunkedBadge", { mb: CHUNK_MB })}</Badge>
               )}
             </div>
-            {!isBusy && <p className={`text-xs ${text.faint}`}>{t("upload.changeFile")}</p>}
+            {!isBusy && (
+              <p className={`text-xs font-medium underline underline-offset-2 ${text.secondary}`}>
+                {t("upload.changeFile")}
+              </p>
+            )}
           </div>
         ) : (
           <p className={`text-sm font-medium ${text.secondary}`}>{t("upload.dropzone")}</p>
