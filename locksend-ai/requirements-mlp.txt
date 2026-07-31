@@ -1,0 +1,3 @@
+# Chỉ cần khi train MLP local (train_mlp.py / train_locksend_258.py).
+# Không cài trên Railway — làm build chậm (CUDA wheels ~GB).
+torch>=2.2.0
