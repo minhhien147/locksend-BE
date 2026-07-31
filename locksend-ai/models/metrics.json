@@ -1,15 +1,14 @@
 {
-  "accuracy": 0.9999703223732209,
-  "precision": 0.9999945105767463,
-  "recall": 0.9999725534863934,
-  "f1": 0.9999835319110394,
-  "roc_auc": 0.9999956182327189,
-  "train_size": 1617379,
-  "test_size": 404345,
-  "attack_ratio": 0.90107452847174,
+  "accuracy": 0.9954013819134473,
+  "precision": 0.9998288469992852,
+  "recall": 0.995221448530775,
+  "f1": 0.997519827568167,
+  "roc_auc": 0.9998890642053195,
+  "train_size": 2577292,
+  "test_size": 644324,
+  "attack_ratio": 0.9292168899086669,
   "combine_profiles": [
     "trustlab",
-    "idsiot2024",
     "ciciot2023"
   ],
   "dataset": "combined",

@@ -740,7 +740,7 @@ def parse_args() -> argparse.Namespace:
         "-c",
         default=os.getenv("LOCKSEND_TRAIN_COMBINE", "").strip(),
         metavar="A,B,C",
-        help="Gộp nhiều profile: trustlab,idsiot2024,ciciot2023 (ưu tiên hơn --dataset)",
+        help="Gộp nhiều profile: trustlab,ciciot2023 (ưu tiên hơn --dataset)",
     )
     parser.add_argument(
         "--max-rows",

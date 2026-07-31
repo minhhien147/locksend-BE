@@ -1,6 +1,6 @@
 # LockSend AI (monorepo)
 
-Random Forest phát hiện hành vi bất thường (CIC-IDS2017) — dùng cho **Token Security** trong LockSend.
+Random Forest phát hiện hành vi bất thường (TRUST Lab / CICIoT) — dùng cho **Token Security** trong LockSend.
 
 Nằm trong repo: `secure-file-sharing/locksend-ai/`
 
@@ -10,9 +10,10 @@ Nằm trong repo: `secure-file-sharing/locksend-ai/`
 locksend-ai/
 ├── predict.py      # inference + SHAP
 ├── train.py        # huấn luyện
+├── download_extra_datasets.py  # tải CICIoT2023 (HF)
 ├── server.py       # HTTP service (host riêng Ubuntu)
 ├── requirements.txt
-├── data/           # CSV CIC-IDS2017 (gitignore — xem data/README.md)
+├── data/           # CSV train (gitignore — xem data/README.md)
 ├── models/
 │   ├── model.pkl   # gitignore — tạo bằng train.py
 │   └── metrics.json
@@ -22,16 +23,14 @@ locksend-ai/
 
 ## Dataset
 
-Hỗ trợ nhiều benchmark (mới → cũ): **TRUST Lab 2026**, **IDSIoT2024**, **CICIoT2023**, **UWF-ZeekData24**, **Gotham 2025**, CIC-IDS2018/2017.
-
-Đặt CSV vào `data/<profile>/` (không commit — quá nặng). Chi tiết tải về: [data/README.md](./data/README.md).
+**Chốt:** TRUST Lab 2026 + CICIoT2023 (+ CIC-IDS2017 legacy). Chi tiết: [data/README.md](./data/README.md).
 
 ```powershell
 # Một dataset
-python train.py --dataset idsiot2024
+python train.py --dataset trustlab
 
-# Gộp nhiều nguồn (khuyến nghị)
-python train.py --combine trustlab,idsiot2024,ciciot2023 --max-rows 200000
+# Gộp (khuyến nghị)
+python train.py --combine trustlab,ciciot2023 --max-rows 200000
 ```
 
 ## Train & chạy local
@@ -44,7 +43,7 @@ pip install -r requirements.txt
 
 # TRUST Lab 2026 (khuyến nghị) — xem data/README.md
 python train.py --dataset trustlab
-python train.py --combine trustlab,idsiot2024,ciciot2023
+python train.py --combine trustlab,ciciot2023
 
 # Hoặc tự chọn: auto | cic2018 | cic2017
 python train.py --dataset auto
