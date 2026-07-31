@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Bench fixtures (regenerate: npm run bench:multiformat)
+scripts/fixtures/multiformat/*
+!scripts/fixtures/multiformat/RESULTS.md
+!scripts/fixtures/multiformat/.gitkeep

@@ -10,7 +10,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "start": "serve dist --single --listen tcp://0.0.0.0:${PORT:-3000}"
+    "start": "serve dist --single --listen tcp://0.0.0.0:${PORT:-3000}",
+    "bench:multiformat": "node scripts/bench-multiformat.mjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.2",
