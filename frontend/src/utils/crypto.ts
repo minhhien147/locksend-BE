@@ -405,7 +405,7 @@ export async function decryptFile(
   const signature = fromBase64(metadata.signature);
   const isValid = ed25519.verify(signature, ciphertext, signerPublicKey);
   if (!isValid) {
-    throw new Error("Chữ ký Ed25519 không hợp lệ — file có thể bị giả mạo!");
+    throw new Error("Chữ ký không hợp lệ — file có thể bị giả mạo!");
   }
 
   const ephemeralPublicKey = fromBase64(metadata.ephemeralPublicKey);
@@ -685,7 +685,7 @@ export async function decryptFileChunked(
   });
 
   if (!verifyManifest(manifest, signature, signerPublicKey)) {
-    throw new Error("Chữ ký Ed25519 không hợp lệ — metadata bị giả mạo!");
+    throw new Error("Chữ ký không hợp lệ — metadata bị giả mạo!");
   }
 
   // 2. Dẫn xuất AES key
@@ -788,7 +788,7 @@ export async function prepareChunkedDecryption(
   });
 
   if (!verifyManifest(manifest, signature, signerPublicKey)) {
-    throw new Error("Chữ ký Ed25519 không hợp lệ — metadata bị giả mạo!");
+    throw new Error("Chữ ký không hợp lệ — metadata bị giả mạo!");
   }
 
   const ephemeralPublicKey = fromBase64(metadata.ephemeralPublicKey);

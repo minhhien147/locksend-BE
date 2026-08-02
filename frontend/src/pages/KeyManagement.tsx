@@ -587,14 +587,14 @@ export default function KeyManagement() {
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_22rem] xl:grid-cols-[minmax(0,1fr)_24rem] lg:items-center">
           <div className="flex flex-col gap-3 min-w-0 lg:justify-center">
             <KeyBlock
-              title="X25519"
+              title={t("keys.encryptPublic")}
               accent="indigo"
               value={toBase64(pageState.keys.x25519.publicKey)}
               copied={copied === "x25519"}
               onCopy={() => copyToClipboard(toBase64(pageState.keys.x25519.publicKey), "x25519")}
             />
             <KeyBlock
-              title="Ed25519"
+              title={t("keys.signPublic")}
               accent="violet"
               value={toBase64(pageState.keys.ed25519.publicKey)}
               copied={copied === "ed25519"}
@@ -894,16 +894,18 @@ function KeyBlock({
         <div className="min-w-0 flex items-center gap-1.5">
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
           <span className={`text-xs font-semibold ${labelColor}`}>{title}</span>
-          <span className={`text-[10px] ${text.faint}`}>{t("keys.publicKey")}</span>
         </div>
-        <button type="button" onClick={onCopy}
+        <button
+          type="button"
+          onClick={onCopy}
           className={`shrink-0 text-xs font-medium px-2 py-1 rounded-md border transition ${
             copied
               ? "border-emerald-500/40 text-emerald-700 bg-emerald-100 dark:border-emerald-500/30 dark:text-emerald-400 dark:bg-emerald-500/10"
               : accent === "indigo"
                 ? "border-indigo-400/45 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-500/25 dark:text-indigo-400/90 dark:hover:bg-indigo-500/15"
                 : "border-violet-400/45 text-violet-700 hover:bg-violet-100 dark:border-violet-500/25 dark:text-violet-400/90 dark:hover:bg-violet-500/15"
-          }`}>
+          }`}
+        >
           {copied ? t("common.copied") : t("common.copy")}
         </button>
       </div>

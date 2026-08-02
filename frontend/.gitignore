@@ -23,7 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 
-# Bench fixtures (regenerate: npm run bench:multiformat)
+# Bench fixtures (regenerate: npm run bench:multiformat / bench:crypto)
 scripts/fixtures/multiformat/*
 !scripts/fixtures/multiformat/RESULTS.md
 !scripts/fixtures/multiformat/.gitkeep
+scripts/fixtures/crypto-only/*
+!scripts/fixtures/crypto-only/RESULTS.md
+!scripts/fixtures/crypto-only/.gitkeep

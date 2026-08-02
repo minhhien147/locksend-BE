@@ -194,7 +194,7 @@ export function useUpload(): UseUploadReturn {
         ...prev,
         error: t("upload.multiRecipientChunkLimit", {
           count: multiCount,
-          mb: DEFAULT_CHUNK_SIZE / (1024 * 1024),
+          mb: CHUNKED_THRESHOLD / (1024 * 1024),
         }),
       }));
       return;
