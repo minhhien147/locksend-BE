@@ -10,7 +10,7 @@ const pad = { none: "", sm: "p-4", md: "p-5" };
 
 export default function Card({ children, className = "", padding = "md" }: CardProps) {
   return (
-    <div className={`${surfaceCard} ${pad[padding]} ${className}`.trim()}>
+    <div className={`w-full ${surfaceCard} ${pad[padding]} ${className}`.trim()}>
       {children}
     </div>
   );

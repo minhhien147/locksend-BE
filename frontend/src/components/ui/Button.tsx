@@ -29,7 +29,7 @@ export default function Button({
     <button
       type="button"
       disabled={disabled || loading}
-      className={`${variants[variant]} ${fullWidth ? "w-full" : ""} ${className}`.trim()}
+      className={`${variants[variant]} ${fullWidth ? "w-full min-w-0" : ""} ${className}`.trim()}
       {...rest}
     >
       {loading ? <LoadingSpinner size="sm" /> : null}

@@ -28,6 +28,7 @@ import SegmentedControl from "../components/ui/SegmentedControl";
 import {
   dropzone,
   inputBase,
+  textareaBase,
   text,
   label,
   sectionTitle,
@@ -225,7 +226,7 @@ export default function UploadPage() {
 
   if (stage === "done") {
     return (
-      <div className="max-w-2xl mx-auto">
+      <div className="w-full max-w-2xl mx-auto">
         <DoneCard
           sasUrl={sasUrl}
           copied={copied}
@@ -239,7 +240,7 @@ export default function UploadPage() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-5">
+    <div className="w-full max-w-2xl mx-auto space-y-5">
       <PageHeader title={t("upload.title")} />
 
       <KeyUnlockBanner onUnlocked={onKeysUnlocked} />
@@ -290,7 +291,7 @@ export default function UploadPage() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onClick={() => !isBusy && fileInputRef.current?.click()}
-        className={`relative p-10 text-center transition-colors ${isBusy ? "cursor-not-allowed opacity-70" : "cursor-pointer"} ${
+        className={`relative w-full p-10 text-center transition-colors ${isBusy ? "cursor-not-allowed opacity-70" : "cursor-pointer"} ${
           dragging ? dropzone.active : file ? dropzone.filled : dropzone.base
         }`}
       >
@@ -324,7 +325,7 @@ export default function UploadPage() {
 
       {uploadPurpose === "share" && (
       <Card className="space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="w-full flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <h2 className={sectionTitle}>{t("upload.recipients")}</h2>
           <SegmentedControl
             value={recipientMode}
@@ -338,10 +339,10 @@ export default function UploadPage() {
         </div>
 
         {recipientMode === "search" ? (
-          <div className="space-y-3">
+          <div className="w-full space-y-3">
             {selectedRecipients.length > 0 && (
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <p className={`text-xs ${text.muted}`}>
                     {t("upload.recipientCount", { count: selectedRecipients.length })}
                   </p>
@@ -380,7 +381,7 @@ export default function UploadPage() {
                 </ul>
               </div>
             )}
-            <div className="relative">
+            <div className="relative w-full">
               <input
                 type="text"
                 value={searchQuery}
@@ -427,8 +428,8 @@ export default function UploadPage() {
             {keyError && <p className="text-xs text-rose-600 dark:text-rose-400">{keyError}</p>}
           </div>
         ) : (
-          <div className="space-y-3">
-            <div>
+          <div className="w-full space-y-3">
+            <div className="w-full">
               <label className={label}>{t("upload.publicKeyLabel")}</label>
               <textarea
                 value={recipientPublicKey}
@@ -436,78 +437,130 @@ export default function UploadPage() {
                 placeholder={t("upload.keyPlaceholderRecipient")}
                 rows={3}
                 disabled={isBusy}
-                className={`w-full mt-1.5 font-mono text-sm resize-none ${inputBase}`}
+                className={`mt-1.5 font-mono ${textareaBase}`}
               />
             </div>
           </div>
         )}
-      </Card>
-      )}
 
-      {error && <Alert tone="error">{error}</Alert>}
+        {error && <Alert tone="error">{error}</Alert>}
 
-      {isBusy && transferStats && (
-        <TransferProgressPanel
-          stats={transferStats}
-          label={
-            stage === "encrypting"
+        {isBusy && transferStats && (
+          <TransferProgressPanel
+            stats={transferStats}
+            label={
+              stage === "encrypting"
+                ? isChunkedMode
+                  ? t("upload.encryptingChunk", { mb: CHUNK_MB })
+                  : t("upload.encrypting")
+                : isChunkedMode
+                  ? t("upload.multipartUpload")
+                  : t("upload.uploadCiphertext")
+            }
+            showSpeed={stage === "uploading"}
+            showBar={stage === "uploading" && !chunkProgress}
+            barClassName="bg-blue-700 dark:bg-blue-600"
+          />
+        )}
+
+        {isBusy && chunkProgress && <ChunkProgressBar progress={chunkProgress} t={t} />}
+
+        <div className="flex w-full gap-3 pt-1">
+          <Button
+            fullWidth
+            className="flex-1"
+            loading={isBusy}
+            disabled={
+              isBusy ||
+              !canUseKeys ||
+              !file ||
+              (recipientMode === "search" &&
+                (selectedRecipients.length === 0 || keyLoading)) ||
+              (recipientMode === "manual" && !recipientPublicKey.trim())
+            }
+            onClick={() =>
+              void encryptAndUpload(
+                file,
+                recipientMode === "search" ? selectedRecipients : [],
+                recipientMode === "manual" ? recipientPublicKey : undefined,
+                { purpose: uploadPurpose, folderId: vaultFolderId }
+              ).catch(() => {})
+            }
+          >
+            {stage === "encrypting"
               ? isChunkedMode
                 ? t("upload.encryptingChunk", { mb: CHUNK_MB })
                 : t("upload.encrypting")
-              : isChunkedMode
-                ? t("upload.multipartUpload")
-                : t("upload.uploadCiphertext")
-          }
-          showSpeed={stage === "uploading"}
-          showBar={stage === "uploading" && !chunkProgress}
-          barClassName="bg-blue-700 dark:bg-blue-600"
-        />
+              : stage === "uploading"
+                ? isChunkedMode
+                  ? t("upload.multipartUpload")
+                  : t("upload.uploading")
+                : t("upload.encryptUpload")}
+          </Button>
+          {isBusy && (
+            <Button variant="secondary" className="shrink-0" onClick={cancel}>
+              {t("common.cancel")}
+            </Button>
+          )}
+        </div>
+      </Card>
       )}
 
-      {isBusy && chunkProgress && <ChunkProgressBar progress={chunkProgress} t={t} />}
+      {uploadPurpose === "vault" && (
+        <>
+          {error && <Alert tone="error">{error}</Alert>}
 
-      <div className="flex gap-3">
-        <Button
-          fullWidth
-          loading={isBusy}
-          disabled={
-            isBusy ||
-            !canUseKeys ||
-            !file ||
-            (uploadPurpose === "share" &&
-              recipientMode === "search" &&
-              (selectedRecipients.length === 0 || keyLoading)) ||
-            (uploadPurpose === "share" &&
-              recipientMode === "manual" &&
-              !recipientPublicKey.trim())
-          }
-          onClick={() =>
-            void encryptAndUpload(
-              file,
-              recipientMode === "search" ? selectedRecipients : [],
-              recipientMode === "manual" ? recipientPublicKey : undefined,
-              { purpose: uploadPurpose, folderId: vaultFolderId }
-            ).catch(() => {})
-          }
-        >
-          {stage === "encrypting"
-            ? isChunkedMode
-              ? t("upload.encryptingChunk", { mb: CHUNK_MB })
-              : t("upload.encrypting")
-            : stage === "uploading"
-              ? isChunkedMode
-                ? t("upload.multipartUpload")
-                : t("upload.uploading")
-              : uploadPurpose === "vault"
-                ? t("upload.saveVault")
-                : t("upload.encryptUpload")}
-        </Button>
-        {isBusy && (
-          <Button variant="secondary" onClick={cancel}>
-            {t("common.cancel")}
-          </Button>
-        )}
-      </div>
+          {isBusy && transferStats && (
+            <TransferProgressPanel
+              stats={transferStats}
+              label={
+                stage === "encrypting"
+                  ? isChunkedMode
+                    ? t("upload.encryptingChunk", { mb: CHUNK_MB })
+                    : t("upload.encrypting")
+                  : isChunkedMode
+                    ? t("upload.multipartUpload")
+                    : t("upload.uploadCiphertext")
+              }
+              showSpeed={stage === "uploading"}
+              showBar={stage === "uploading" && !chunkProgress}
+              barClassName="bg-blue-700 dark:bg-blue-600"
+            />
+          )}
+
+          {isBusy && chunkProgress && <ChunkProgressBar progress={chunkProgress} t={t} />}
+
+          <div className="flex w-full gap-3">
+            <Button
+              fullWidth
+              className="flex-1"
+              loading={isBusy}
+              disabled={isBusy || !canUseKeys || !file}
+              onClick={() =>
+                void encryptAndUpload(file, [], undefined, {
+                  purpose: uploadPurpose,
+                  folderId: vaultFolderId,
+                }).catch(() => {})
+              }
+            >
+              {stage === "encrypting"
+                ? isChunkedMode
+                  ? t("upload.encryptingChunk", { mb: CHUNK_MB })
+                  : t("upload.encrypting")
+                : stage === "uploading"
+                  ? isChunkedMode
+                    ? t("upload.multipartUpload")
+                    : t("upload.uploading")
+                  : t("upload.saveVault")}
+            </Button>
+            {isBusy && (
+              <Button variant="secondary" className="shrink-0" onClick={cancel}>
+                {t("common.cancel")}
+              </Button>
+            )}
+          </div>
+        </>
+      )}
 
     </div>
   );

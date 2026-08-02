@@ -8,8 +8,8 @@ interface PageHeaderProps {
 
 export default function PageHeader({ title, description, actions }: PageHeaderProps) {
   return (
-    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
-      <div>
+    <div className="w-full flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+      <div className="min-w-0">
         <h1 className={pageTitle}>{title}</h1>
         {description && <p className={pageDesc}>{description}</p>}
       </div>

@@ -13,7 +13,7 @@ import Alert from "../components/ui/Alert";
 import VirusTotalCheck from "../components/VirusTotalCheck";
 import TransferProgressPanel from "../components/TransferProgressPanel";
 import { useT } from "../i18n/context";
-import { inputBase, label } from "../styles/theme";
+import { label, textareaBase } from "../styles/theme";
 
 export default function DownloadPage() {
   const t = useT();
@@ -46,13 +46,13 @@ export default function DownloadPage() {
   const isBusy = stage === "downloading" || stage === "decrypting";
 
   return (
-    <div className="max-w-2xl mx-auto space-y-5">
+    <div className="w-full max-w-2xl mx-auto space-y-5">
       <PageHeader title={t("download.title")} />
 
       <KeyUnlockBanner onUnlocked={() => setUnlockTick((n) => n + 1)} />
 
       <Card className="space-y-4">
-        <div>
+        <div className="w-full">
           <label className={label}>
             {t("download.sasLabel")} <span className="text-rose-600 dark:text-rose-400">*</span>
           </label>
@@ -62,7 +62,7 @@ export default function DownloadPage() {
             placeholder={t("download.sasPlaceholder")}
             rows={4}
             disabled={isBusy}
-            className={`w-full mt-1.5 font-mono text-sm resize-none ${inputBase}`}
+            className={`mt-1.5 font-mono ${textareaBase}`}
           />
         </div>
 
@@ -112,9 +112,10 @@ export default function DownloadPage() {
           </>
         )}
 
-        <div className="flex gap-3 pt-1">
+        <div className="flex w-full gap-3 pt-1">
           <Button
             fullWidth
+            className="flex-1"
             loading={isBusy}
             disabled={isBusy || !sasUrl.trim()}
             onClick={() => void downloadAndDecrypt(sasUrl).catch(() => {})}
@@ -126,13 +127,14 @@ export default function DownloadPage() {
                 : t("download.downloadDecrypt")}
           </Button>
           {isBusy && (
-            <Button variant="secondary" onClick={cancel}>
+            <Button variant="secondary" className="shrink-0" onClick={cancel}>
               {t("common.cancel")}
             </Button>
           )}
           {stage === "done" && (
             <Button
               variant="secondary"
+              className="shrink-0"
               onClick={() => {
                 clearDownloadDraft();
                 reset();

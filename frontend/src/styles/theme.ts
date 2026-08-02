@@ -47,6 +47,15 @@ export const inputBase =
   "dark:bg-[#12161f] dark:border-white/[0.1] dark:text-slate-100 dark:placeholder:text-slate-500 " +
   "dark:focus:border-blue-400/80 dark:focus:ring-blue-500/20";
 
+/** Textarea — không dùng h-9 của inputBase (làm lệch / cắt hàng). */
+export const textareaBase =
+  "w-full min-h-[5.5rem] rounded-md px-3 py-2.5 text-sm resize-none " +
+  "bg-white border border-slate-300/90 text-slate-900 placeholder:text-slate-400 " +
+  "focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/25 " +
+  "disabled:opacity-50 " +
+  "dark:bg-[#12161f] dark:border-white/[0.1] dark:text-slate-100 dark:placeholder:text-slate-500 " +
+  "dark:focus:border-blue-400/80 dark:focus:ring-blue-500/20";
+
 export const btnGhost =
   "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 " +
   "dark:border-white/12 dark:bg-transparent dark:text-slate-300 dark:hover:bg-white/[0.05]";
