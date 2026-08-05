@@ -7,11 +7,12 @@ import os
 import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+import re
 
 import jwt
 from fastapi import HTTPException, Request, Response
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import audit
@@ -38,6 +39,21 @@ REFRESH_COOKIE_PERSIST = os.getenv("REFRESH_COOKIE_PERSIST", "false").lower() ==
 
 VALID_ROLES = {"owner", "recipient", "admin"}
 RoleType = Literal["owner", "recipient", "admin"]
+
+# Block HTML/script-like display names (stored-XSS PoC / layout-breaking payloads).
+_UNSAFE_DISPLAY_NAME = re.compile(
+    r"[<>`]|javascript:|data:text/html|on(?:error|load|click|mouse\w+)\s*=",
+    re.IGNORECASE,
+)
+
+
+def _validate_display_name(name: str) -> str:
+    cleaned = name.strip()
+    if not cleaned:
+        raise ValueError("Tên hiển thị không được để trống")
+    if _UNSAFE_DISPLAY_NAME.search(cleaned):
+        raise ValueError("Tên hiển thị không được chứa HTML hoặc script")
+    return cleaned
 
 # ── Password context ──────────────────────────────────────────────────────────
 
@@ -196,6 +212,13 @@ class RegisterRequest(BaseModel):
     display_name: str | None = Field(default=None, max_length=128)
     role: RoleType = "owner"
 
+    @field_validator("display_name")
+    @classmethod
+    def _check_display_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _validate_display_name(v)
+
 
 class LoginRequest(BaseModel):
     username: EmailStr
@@ -249,6 +272,11 @@ class ChangePasswordRequest(BaseModel):
 
 class UpdateProfileRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=128)
+
+    @field_validator("display_name")
+    @classmethod
+    def _check_display_name(cls, v: str) -> str:
+        return _validate_display_name(v)
 
 
 class UpdateEmailRequest(BaseModel):
