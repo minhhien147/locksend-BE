@@ -87,7 +87,7 @@ async def ciphertext_info_by_sas(
     db: AsyncSession = Depends(get_db),
 ):
     """Trả metadata + file_id từ SAS URL — không tải blob."""
-    blob_name = await ensure_sas_download_allowed(db, body.sas_url)
+    blob_name = await ensure_sas_download_allowed(db, body.sas_url, current)
     file_row = (await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))).scalar_one_or_none()
     if file_row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy file")
@@ -108,7 +108,7 @@ async def download_ciphertext_by_sas(
     db: AsyncSession = Depends(get_db),
 ):
     """Proxy tải ciphertext từ SAS URL qua backend (tránh CORS ở browser)."""
-    blob_name = await ensure_sas_download_allowed(db, body.sas_url)
+    blob_name = await ensure_sas_download_allowed(db, body.sas_url, current)
     file_row = (await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))).scalar_one_or_none()
     if file_row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy file")
@@ -185,7 +185,7 @@ async def download_ciphertext_chunk(
 
     try:
         if sas_url:
-            sas_blob = await ensure_sas_download_allowed(db, sas_url)
+            sas_blob = await ensure_sas_download_allowed(db, sas_url, current)
             if sas_blob != file_row.blob_name:
                 raise HTTPException(status_code=400, detail="SAS URL không khớp file_id")
             blob_client = BlobClient.from_blob_url(sas_url.strip())

@@ -602,7 +602,7 @@ async def build_security_snapshot(
 # ── Actions ────────────────────────────────────────────────────────────────────
 
 async def revoke_jwt_sessions(db: AsyncSession, user_id: str, reason: str = "Token security") -> int:
-    """Thu hồi toàn bộ refresh session active của user."""
+    """Thu hồi toàn bộ refresh session active của user + invalidate access JWTs."""
     now = _utc_now()
     tokens = (
         await db.execute(
@@ -618,6 +618,12 @@ async def revoke_jwt_sessions(db: AsyncSession, user_id: str, reason: str = "Tok
         if _aware(rt.expires_at) > now:
             rt.revoked_at = now
             count += 1
+    # Access JWTs are not listed in refresh_tokens — bump version so they fail auth.
+    user = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if user is not None:
+        user.token_version = int(user.token_version or 0) + 1
     return count
 
 
@@ -784,15 +790,48 @@ async def track_sas_issue(
 
 
 async def is_sas_revoked(db: AsyncSession, blob_name: str, user_id: str | None) -> bool:
-    """Kiểm tra blob_name + user_id có SAS bị revoke không."""
+    """Kiểm tra blob_name (+ optional user_id) có SAS bị soft-revoke không."""
+    conditions = [
+        SasTokenRecord.blob_name == blob_name,
+        SasTokenRecord.is_revoked.is_(True),
+    ]
+    if user_id is not None:
+        conditions.append(SasTokenRecord.user_id == user_id)
     result = await db.execute(
-        select(SasTokenRecord).where(
-            SasTokenRecord.blob_name == blob_name,
-            SasTokenRecord.is_revoked.is_(True),
-        ).order_by(SasTokenRecord.revoked_at.desc()).limit(1)
+        select(SasTokenRecord)
+        .where(*conditions)
+        .order_by(SasTokenRecord.revoked_at.desc())
+        .limit(1)
     )
     revoked = result.scalar_one_or_none()
     return revoked is not None
+
+
+async def revoke_sas_for_recipient(
+    db: AsyncSession,
+    *,
+    file_id: str,
+    recipient_id: str,
+    reason: str = "recipient revoked",
+) -> int:
+    """Soft-revoke all unexpired SAS records issued to a recipient for a file."""
+    now = _utc_now()
+    rows = (
+        await db.execute(
+            select(SasTokenRecord).where(
+                SasTokenRecord.file_id == file_id,
+                SasTokenRecord.user_id == recipient_id,
+                SasTokenRecord.is_revoked.is_(False),
+            )
+        )
+    ).scalars().all()
+    count = 0
+    for rec in rows:
+        rec.is_revoked = True
+        rec.revoked_at = now
+        rec.revoke_reason = reason
+        count += 1
+    return count
 
 
 async def log_token_access(

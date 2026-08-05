@@ -25,6 +25,7 @@ from routers._auth_helpers import (
     LoginRequest,
     RegisterRequest,
     TokenResponse,
+    bump_token_version,
     clear_refresh_cookie,
     hash_password,
     issue_refresh_token,
@@ -338,19 +339,45 @@ async def logout(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    """Thu hồi refresh token + xóa cookie."""
-    from datetime import timezone
+    """Thu hồi refresh token, bump token_version (invalidate access JWT), xóa cookie."""
+    from auth import verify_jwt
+
+    user_id: str | None = None
+
+    # Prefer Bearer identity when present so logout invalidates that access JWT
+    # even if the refresh cookie is missing / already cleared.
+    auth_header = request.headers.get("Authorization") or ""
+    if auth_header.lower().startswith("bearer "):
+        raw = auth_header.split(" ", 1)[1].strip()
+        if raw:
+            try:
+                payload = verify_jwt(raw)
+                sub = payload.get("sub")
+                if sub:
+                    user = (
+                        await db.execute(select(User).where(User.external_id == sub))
+                    ).scalar_one_or_none()
+                    if user is not None:
+                        user_id = user.id
+            except HTTPException:
+                pass
+
     jti = request.cookies.get("sf_refresh_token")
+    now = datetime.now(timezone.utc)
     if jti:
-        now = __import__("datetime").datetime.now(timezone.utc)
         await db.execute(
             update(RefreshToken)
             .where(RefreshToken.jti == jti, RefreshToken.revoked_at.is_(None))
             .values(revoked_at=now)
         )
-        await db.commit()
-        rt = (await db.execute(select(RefreshToken).where(RefreshToken.jti == jti))).scalar_one_or_none()
-        user_id = rt.user_id if rt else None
+        if user_id is None:
+            rt = (
+                await db.execute(select(RefreshToken).where(RefreshToken.jti == jti))
+            ).scalar_one_or_none()
+            user_id = rt.user_id if rt else None
+
+    if user_id:
+        await bump_token_version(db, user_id)
         audit.log_event(
             "user.logout",
             user_id=user_id,
@@ -358,5 +385,6 @@ async def logout(
             request_id=audit.get_request_id(request),
         )
 
+    await db.commit()
     clear_refresh_cookie(response)
     return {"message": "Đã đăng xuất"}

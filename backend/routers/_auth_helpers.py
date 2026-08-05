@@ -61,11 +61,31 @@ def create_access_token(user: User) -> str:
         "email": user.email,
         "name": user.display_name,
         "role": user.role,
+        # Server-checked revocation marker — must match users.token_version.
+        "tv": int(getattr(user, "token_version", 0) or 0),
         "jti": str(_uuid_mod.uuid4()),
         "exp": expire,
         "iat": datetime.now(timezone.utc),
     }
     return jwt.encode(payload, _signing_key(), algorithm=JWT_ALGORITHM)
+
+
+async def bump_token_version(db: AsyncSession, user_id: str) -> int:
+    """
+    Invalidate all outstanding access JWTs for this user by advancing
+    users.token_version. Call on logout, password change, and admin revoke.
+    Returns the new version.
+    """
+    from sqlalchemy import select
+
+    user = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if user is None:
+        return 0
+    user.token_version = int(user.token_version or 0) + 1
+    await db.flush()
+    return user.token_version
 
 
 async def issue_refresh_token(
@@ -158,6 +178,16 @@ def to_user_out(u: User, has_public_key: bool = False) -> "UserOut":
     )
 
 
+def to_user_search_out(u: User, has_public_key: bool = False) -> "UserSearchOut":
+    """Minimal fields for recipient picker — no role/quota/created_at."""
+    return UserSearchOut(
+        id=u.id,
+        email=u.email,
+        display_name=u.display_name,
+        has_public_key=has_public_key,
+    )
+
+
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
@@ -234,6 +264,15 @@ class UserOut(BaseModel):
     vault_quota_bytes: int | None = None
     effective_vault_quota_bytes: int
     created_at: str
+    has_public_key: bool = False
+
+
+class UserSearchOut(BaseModel):
+    """Least-privilege response for GET /auth/users/search (recipient selection)."""
+
+    id: str
+    email: str | None
+    display_name: str | None
     has_public_key: bool = False
 
 

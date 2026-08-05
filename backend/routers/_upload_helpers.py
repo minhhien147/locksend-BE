@@ -239,19 +239,34 @@ async def authorize_file_download(
         raise HTTPException(status_code=403, detail="Bạn không có quyền tải file này")
 
 
-async def ensure_sas_download_allowed(db: AsyncSession, sas_url: str) -> str:
+async def ensure_sas_download_allowed(
+    db: AsyncSession,
+    sas_url: str,
+    current: CurrentUser,
+) -> str:
     """
-    SAS URL là bearer credential cho blob — dùng thay authorize_file_download
-    khi client gửi link tải (trang Download / proxy CORS).
+    Re-authorize download via current share/owner state before proxying SAS.
+
+    Soft-revoked SAS for this user+blob is blocked, and FileRecipient.status
+    must still be active (or caller is owner/admin). Stale Azure URLs alone
+    are not sufficient authorization for backend proxy routes.
     """
     from services.token_security import is_sas_revoked
 
     blob_name = blob_name_from_sas_url(sas_url)
-    if await is_sas_revoked(db, blob_name, None):
+    if await is_sas_revoked(db, blob_name, current.id):
         raise HTTPException(
             status_code=403,
-            detail="SAS token cho blob này đã bị thu hồi bởi quản trị viên",
+            detail="SAS token cho blob này đã bị thu hồi",
         )
+
+    file_row = (
+        await db.execute(select(FileModel).where(FileModel.blob_name == blob_name))
+    ).scalar_one_or_none()
+    if file_row is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy file")
+
+    await authorize_file_download(db, file_row, current)
     return blob_name
 
 

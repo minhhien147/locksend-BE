@@ -21,9 +21,11 @@ from routers._auth_helpers import (
     PublicKeyOut,
     RegisterRequest,
     UserOut,
+    UserSearchOut,
     hash_password,
     require_admin,
     to_user_out,
+    to_user_search_out,
 )
 from services.vault_storage import normalize_storage_plan
 
@@ -58,7 +60,7 @@ async def get_user_public_key(
     )
 
 
-@router.get("/users/search", response_model=list[UserOut])
+@router.get("/users/search", response_model=list[UserSearchOut])
 async def search_users(
     q: str,
     request: Request,
@@ -88,7 +90,7 @@ async def search_users(
         ).scalars().all()
         active_key_ids = set(key_rows)
 
-    return [to_user_out(u, has_public_key=u.id in active_key_ids) for u in rows]
+    return [to_user_search_out(u, has_public_key=u.id in active_key_ids) for u in rows]
 
 
 # ── Admin: display name history ───────────────────────────────────────────────

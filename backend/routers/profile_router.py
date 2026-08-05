@@ -22,6 +22,7 @@ from routers._auth_helpers import (
     TokenResponse,
     UpdateEmailRequest,
     UpdateProfileRequest,
+    bump_token_version,
     hash_password,
     issue_refresh_token,
     make_token_response,
@@ -181,6 +182,9 @@ async def change_password(
         .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
         .values(revoked_at=now)
     )
+    # Invalidate all pre-change access JWTs before issuing replacements.
+    await bump_token_version(db, user.id)
+    await db.refresh(user)
     jti, expires_at = await issue_refresh_token(db, user, request)
     await db.commit()
     set_refresh_cookie(response, jti, expires_at)

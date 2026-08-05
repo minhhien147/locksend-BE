@@ -35,7 +35,6 @@ export interface UserSearchResult {
   id: string;
   email: string | null;
   display_name: string | null;
-  role: string;
   has_public_key: boolean;
 }
 

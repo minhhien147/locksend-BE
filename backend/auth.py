@@ -175,6 +175,11 @@ async def get_current_user(
         await db.flush()
         logger.info("New user provisioned: sub=%s role=%s", sub, _DEFAULT_NEW_USER_ROLE)
     else:
+        # Reject access tokens issued before logout / password change / admin revoke.
+        token_tv = int(payload.get("tv", 0) or 0)
+        current_tv = int(getattr(user, "token_version", 0) or 0)
+        if token_tv != current_tv:
+            raise _unauthorized("Token đã bị thu hồi")
         # Sync email/name nếu thay đổi ở IdP
         updated = False
         if email and user.email != email:

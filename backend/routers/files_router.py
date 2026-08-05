@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["files"], dependencies=[Depends(require_verified_email)])
 
+# Shared-recipient SAS cannot be revoked on Azure itself — keep TTL short.
+SHARED_SAS_HOURS = max(1, int(os.getenv("SHARED_SAS_HOURS", "1")))
 
 @router.get("/sas-token/{blob_name:path}", response_model=SasResponse)
 async def get_sas_token(
@@ -122,7 +125,7 @@ async def shared_file_sas(
     sas_url, expires_at = await generate_and_track_sas(
         request, db, current,
         blob_name=file.blob_name, file_id=file.id,
-        hours=24, endpoint=f"/files/shared/{file_id}/sas",
+        hours=SHARED_SAS_HOURS, endpoint=f"/files/shared/{file_id}/sas",
     )
     return FreshSasResponse(file_id=file.id, blob_name=file.blob_name, sas_url=sas_url, expires_at=expires_at)
 
@@ -236,6 +239,16 @@ async def revoke_recipient(
     fr.status = RecipientStatus.revoked
     fr.revoked_at = datetime.now(timezone.utc)
     fr.revoke_reason = body.reason
+
+    # Soft-revoke previously minted recipient SAS so proxy routes reject them.
+    from services.token_security import revoke_sas_for_recipient
+
+    await revoke_sas_for_recipient(
+        db,
+        file_id=file_id,
+        recipient_id=recipient_id,
+        reason=body.reason or "recipient revoked",
+    )
 
     audit.log_event(
         "file.revoke",
