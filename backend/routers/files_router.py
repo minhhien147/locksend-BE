@@ -1,6 +1,7 @@
 """files_router.py — File listing, SAS token, và revoke endpoints."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from schemas.files import (
     SasResponse,
     SharedFileResponse,
 )
+from services.azure_storage import REVOKE_ROTATE_BLOB, STORAGE_ACCOUNT, rotate_blob
 
 from routers._upload_helpers import generate_and_track_sas
 
@@ -240,8 +242,10 @@ async def revoke_recipient(
     fr.revoked_at = datetime.now(timezone.utc)
     fr.revoke_reason = body.reason
 
-    # Soft-revoke previously minted recipient SAS so proxy routes reject them.
-    from services.token_security import revoke_sas_for_recipient
+    # Soft-revoke every tracked SAS for this file so proxy routes reject them.
+    # Also rotate the blob object so previously issued Azure SAS URLs die at
+    # the storage layer (user-delegation SAS cannot be revoked in place).
+    from services.token_security import revoke_sas_for_file, revoke_sas_for_recipient
 
     await revoke_sas_for_recipient(
         db,
@@ -249,6 +253,29 @@ async def revoke_recipient(
         recipient_id=recipient_id,
         reason=body.reason or "recipient revoked",
     )
+    await revoke_sas_for_file(
+        db,
+        file_id=file_id,
+        reason=body.reason or "storage rotated after recipient revoke",
+    )
+
+    rotated_blob: str | None = None
+    old_blob = file_rec.blob_name
+    if REVOKE_ROTATE_BLOB and STORAGE_ACCOUNT and old_blob:
+        try:
+            new_blob = await asyncio.to_thread(rotate_blob, old_blob)
+            file_rec.blob_name = new_blob
+            file_rec.updated_at = datetime.now(timezone.utc)
+            rotated_blob = new_blob
+        except Exception as exc:
+            # Soft-revoke already applied; do not fail the revoke UX if Azure
+            # rotate is temporarily unavailable.
+            logger.error(
+                "revoke: blob rotate failed for file_id=%s blob=%s: %s",
+                file_id,
+                old_blob,
+                exc,
+            )
 
     audit.log_event(
         "file.revoke",
@@ -257,10 +284,14 @@ async def revoke_recipient(
         file_id=file_id,
         recipient_id=recipient_id,
         reason=body.reason,
+        old_blob_name=old_blob if rotated_blob else None,
+        new_blob_name=rotated_blob,
     )
     return {
         "file_id": file_id,
         "recipient_id": recipient_id,
         "status": "revoked",
         "revoked_at": fr.revoked_at.isoformat(),
+        "blob_rotated": rotated_blob is not None,
+        "blob_name": file_rec.blob_name,
     }

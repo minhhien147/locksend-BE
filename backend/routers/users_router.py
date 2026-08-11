@@ -67,30 +67,41 @@ async def search_users(
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Tìm user theo email (partial match). Dùng khi chọn recipient khi upload."""
-    if len(q.strip()) < 2:
+    """
+    Recipient picker — not a general directory search.
+
+    Hardening (pentest #9):
+      - minimum 3-character prefix
+      - email prefix match only (not substring / domain fishing)
+      - eligible share recipients only: non-admin + active public key
+      - when email verification is enforced, require verified email
+    """
+    from services.email_verification import verification_required
+
+    prefix = q.strip().lower()
+    if len(prefix) < 3:
         return []
-    pattern = f"%{q.strip().lower()}%"
+
+    conditions = [
+        User.email.ilike(f"{prefix}%"),
+        User.id != current.id,
+        User.role != "admin",
+        UserPublicKey.is_active.is_(True),
+    ]
+    if verification_required():
+        conditions.append(User.email_verified_at.is_not(None))
+
     rows = (
         await db.execute(
-            select(User).where(User.email.ilike(pattern), User.id != current.id).limit(10)
+            select(User)
+            .join(UserPublicKey, UserPublicKey.user_id == User.id)
+            .where(*conditions)
+            .limit(10)
         )
-    ).scalars().all()
+    ).scalars().unique().all()
 
-    user_ids = [u.id for u in rows]
-    active_key_ids: set[str] = set()
-    if user_ids:
-        key_rows = (
-            await db.execute(
-                select(UserPublicKey.user_id).where(
-                    UserPublicKey.user_id.in_(user_ids),
-                    UserPublicKey.is_active.is_(True),
-                )
-            )
-        ).scalars().all()
-        active_key_ids = set(key_rows)
-
-    return [to_user_search_out(u, has_public_key=u.id in active_key_ids) for u in rows]
+    # has_public_key is always true for this result set (join filter).
+    return [to_user_search_out(u, has_public_key=True) for u in rows]
 
 
 # ── Admin: display name history ───────────────────────────────────────────────

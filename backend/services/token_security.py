@@ -834,6 +834,31 @@ async def revoke_sas_for_recipient(
     return count
 
 
+async def revoke_sas_for_file(
+    db: AsyncSession,
+    *,
+    file_id: str,
+    reason: str = "file storage rotated after revoke",
+) -> int:
+    """Soft-revoke every active SAS record for a file (all users)."""
+    now = _utc_now()
+    rows = (
+        await db.execute(
+            select(SasTokenRecord).where(
+                SasTokenRecord.file_id == file_id,
+                SasTokenRecord.is_revoked.is_(False),
+            )
+        )
+    ).scalars().all()
+    count = 0
+    for rec in rows:
+        rec.is_revoked = True
+        rec.revoked_at = now
+        rec.revoke_reason = reason
+        count += 1
+    return count
+
+
 async def log_token_access(
     db: AsyncSession,
     *,

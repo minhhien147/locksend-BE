@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
 
@@ -16,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 STORAGE_ACCOUNT = os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "")
 CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "secure-files")
+# On recipient revoke: copy ciphertext to a new blob path and delete the old one
+# so previously issued Azure SAS URLs stop working at the storage layer.
+REVOKE_ROTATE_BLOB: bool = os.getenv("REVOKE_ROTATE_BLOB", "true").lower() == "true"
 
 
 def check_container_not_public() -> None:
@@ -117,4 +122,68 @@ def delete_blob(blob_name: str) -> None:
     client = get_blob_service_client()
     blob_client = client.get_blob_client(container=CONTAINER_NAME, blob=blob_name)
     blob_client.delete_blob()
+
+
+def rotate_blob(old_blob_name: str, *, wait_timeout_sec: float = 60.0) -> str:
+    """
+    Copy ciphertext to a new blob name and delete the old object.
+
+    Azure user-delegation SAS cannot be revoked in place. Rotating the object
+    path makes any previously issued SAS URL for ``old_blob_name`` fail (404)
+    while active recipients can mint a fresh SAS against the new path.
+    """
+    if not STORAGE_ACCOUNT:
+        raise RuntimeError("AZURE_STORAGE_ACCOUNT_NAME is not configured")
+    if not old_blob_name or old_blob_name.strip() != old_blob_name:
+        raise ValueError("invalid blob_name")
+
+    if "/" in old_blob_name:
+        prefix, leaf = old_blob_name.rsplit("/", 1)
+        # Preserve a stable-looking extension when present.
+        ext = ""
+        if "." in leaf:
+            ext = "." + leaf.rsplit(".", 1)[-1]
+        new_blob_name = f"{prefix}/{uuid.uuid4()}{ext}"
+    else:
+        new_blob_name = str(uuid.uuid4())
+
+    client = get_blob_service_client()
+    source = client.get_blob_client(container=CONTAINER_NAME, blob=old_blob_name)
+    dest = client.get_blob_client(container=CONTAINER_NAME, blob=new_blob_name)
+
+    source_url = source.url
+    dest.start_copy_from_url(source_url)
+
+    deadline = time.monotonic() + wait_timeout_sec
+    while True:
+        props = dest.get_blob_properties()
+        copy = props.copy
+        status = (getattr(copy, "status", None) or "success").lower()
+        if status == "success":
+            break
+        if status == "failed":
+            detail = getattr(copy, "status_description", None) or "unknown"
+            raise RuntimeError(
+                f"Azure blob copy failed for {old_blob_name!r}: {detail}"
+            )
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Timed out waiting for Azure blob copy of {old_blob_name!r}"
+            )
+        time.sleep(0.2)
+
+    # Best-effort delete of the old object so captured SAS URLs stop working.
+    try:
+        source.delete_blob()
+    except Exception as exc:
+        logger.warning(
+            "rotate_blob: copied %s → %s but failed to delete old blob: %s",
+            old_blob_name,
+            new_blob_name,
+            exc,
+        )
+        raise
+
+    logger.info("rotate_blob: %s → %s", old_blob_name, new_blob_name)
+    return new_blob_name
 

@@ -1,9 +1,9 @@
 """
-Regression tests for Strix Deep Scan remediations:
+Regression tests for Strix / Pentest remediations:
 
   - Access JWT invalidated after logout / password change (token_version)
   - Share revoke soft-revokes recipient SAS + proxy re-checks FileRecipient
-  - /auth/users/search returns least-privilege fields only
+  - /auth/users/search is a hardened recipient picker (prefix, eligible-only)
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import SasTokenRecord
+from db.models import SasTokenRecord, UserPublicKey
 from tests.conftest import _auth, _login, _make_user
 from tests.test_share import _make_file, _share
 
@@ -86,6 +86,10 @@ class TestShareRevokeInvalidatesSasProxy:
             headers=_auth(owner_token),
         )
         assert revoke.status_code == 200
+        body = revoke.json()
+        assert body["status"] == "revoked"
+        # Without Azure credentials in tests, rotate is skipped / fails soft.
+        assert "blob_rotated" in body
 
         row = (
             await db_session.execute(
@@ -112,11 +116,28 @@ class TestShareRevokeInvalidatesSasProxy:
 
 
 class TestUserSearchLeastPrivilege:
+    async def _seed_eligible(
+        self, db: AsyncSession, email: str, *, role: str = "owner"
+    ):
+        user = await _make_user(db, email, role=role)
+        user.email_verified_at = datetime.now(timezone.utc)
+        db.add(
+            UserPublicKey(
+                user_id=user.id,
+                public_key_x25519="A" * 44,
+                public_key_ed25519="B" * 44,
+                is_active=True,
+            )
+        )
+        await db.commit()
+        await db.refresh(user)
+        return user
+
     async def test_search_omits_sensitive_metadata(
         self, client: AsyncClient, db_session: AsyncSession
     ):
-        await _make_user(db_session, "searcher@test.com")
-        await _make_user(db_session, "target_admin@test.com", role="admin")
+        await self._seed_eligible(db_session, "searcher@test.com")
+        await self._seed_eligible(db_session, "targetuser@test.com")
         token = await _login(client, "searcher@test.com")
 
         resp = await client.get(
@@ -131,9 +152,55 @@ class TestUserSearchLeastPrivilege:
         assert "id" in row
         assert "email" in row
         assert "display_name" in row
-        assert "has_public_key" in row
+        assert row["has_public_key"] is True
         assert "role" not in row
         assert "storage_plan" not in row
         assert "vault_quota_bytes" not in row
         assert "effective_vault_quota_bytes" not in row
         assert "created_at" not in row
+
+    async def test_search_requires_prefix_and_excludes_admin(
+        self, client: AsyncClient, db_session: AsyncSession
+    ):
+        await self._seed_eligible(db_session, "picker@test.com")
+        await self._seed_eligible(db_session, "adminlook@test.com", role="admin")
+        await self._seed_eligible(db_session, "alice.share@test.com")
+        # No public key → must not appear.
+        await _make_user(db_session, "alice.nokey@test.com")
+        token = await _login(client, "picker@test.com")
+
+        short = await client.get(
+            "/auth/users/search",
+            params={"q": "al"},
+            headers=_auth(token),
+        )
+        assert short.status_code == 200
+        assert short.json() == []
+
+        # Prefix match: "alice.s" hits alice.share, not domain substring fishing.
+        domain = await client.get(
+            "/auth/users/search",
+            params={"q": "test.com"},
+            headers=_auth(token),
+        )
+        assert domain.status_code == 200
+        assert domain.json() == []
+
+        admin_q = await client.get(
+            "/auth/users/search",
+            params={"q": "admin"},
+            headers=_auth(token),
+        )
+        assert admin_q.status_code == 200
+        assert admin_q.json() == []
+
+        ok = await client.get(
+            "/auth/users/search",
+            params={"q": "alice.s"},
+            headers=_auth(token),
+        )
+        assert ok.status_code == 200
+        emails = [r["email"] for r in ok.json()]
+        assert "alice.share@test.com" in emails
+        assert "alice.nokey@test.com" not in emails
+        assert "adminlook@test.com" not in emails
