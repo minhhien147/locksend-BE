@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && node -e \"require('fs').copyFileSync('serve.json','dist/serve.json')\"",
     "preview": "vite preview",
     "start": "serve dist --single --listen tcp://0.0.0.0:${PORT:-3000} -c serve.json",
     "bench:multiformat": "node scripts/bench-multiformat.mjs",
