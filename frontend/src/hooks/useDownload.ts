@@ -25,6 +25,7 @@ import { saveDownloadEntry } from "../utils/downloadHistory";
 import { useT } from "../i18n/context";
 import { useTransferTimer } from "./useTransferTimer";
 import { computeTransferStats, type TransferStats } from "../utils/transferStats";
+import { wipeBytes } from "../utils/fileRisk";
 
 export type DownloadStage =
   | "idle"
@@ -38,6 +39,12 @@ export interface ChunkDecryptProgress {
   total: number;
 }
 
+interface PendingPlaintext {
+  data: Uint8Array;
+  fileName: string;
+  mimeType: string;
+}
+
 interface UseDownloadState {
   stage: DownloadStage;
   error: string;
@@ -48,6 +55,10 @@ interface UseDownloadState {
   plaintextChecksum: string;
   bytesTransferred: number;
   bytesTotal: number;
+  /** Plaintext held in RAM awaiting explicit Save (non-streaming path). */
+  pendingSave: boolean;
+  /** Streaming large-file path wrote plaintext to disk during decrypt. */
+  wroteToDiskDuringDecrypt: boolean;
 }
 
 export interface UseDownloadReturn extends UseDownloadState {
@@ -60,6 +71,8 @@ export interface UseDownloadReturn extends UseDownloadState {
     fileId: string,
     encryptionMetadata: Record<string, unknown>
   ) => Promise<void>;
+  savePendingFile: () => boolean;
+  discardPendingFile: () => void;
   cancel: () => void;
   reset: () => void;
 }
@@ -74,6 +87,8 @@ const initialState: UseDownloadState = {
   plaintextChecksum: "",
   bytesTransferred: 0,
   bytesTotal: 0,
+  pendingSave: false,
+  wroteToDiskDuringDecrypt: false,
 };
 
 function mergeMetadata(
@@ -87,6 +102,7 @@ export function useDownload(): UseDownloadReturn {
   const t = useT();
   const [state, setState] = useState<UseDownloadState>(initialState);
   const abortRef = useRef<AbortController | null>(null);
+  const pendingRef = useRef<PendingPlaintext | null>(null);
   const transferActive =
     state.stage === "downloading" || state.stage === "decrypting";
   const { startedAt, tick } = useTransferTimer(transferActive);
@@ -108,17 +124,46 @@ export function useDownload(): UseDownloadReturn {
     return false;
   }
 
+  function clearPendingPlaintext() {
+    if (pendingRef.current) {
+      wipeBytes(pendingRef.current.data);
+      pendingRef.current = null;
+    }
+  }
+
   function cancel() {
     abortRef.current?.abort();
     abortRef.current = null;
+    clearPendingPlaintext();
     setState(initialState);
+  }
+
+  function discardPendingFile() {
+    clearPendingPlaintext();
+    setState((prev) => ({
+      ...prev,
+      pendingSave: false,
+    }));
+  }
+
+  function savePendingFile(): boolean {
+    const pending = pendingRef.current;
+    if (!pending) return false;
+    downloadBlob(pending.data, pending.fileName, pending.mimeType);
+    clearPendingPlaintext();
+    setState((prev) => ({
+      ...prev,
+      pendingSave: false,
+    }));
+    return true;
   }
 
   async function finishDownload(
     metadata: EncryptionMetadata,
     fileSizeBytes: number,
     logSasUrl: string,
-    serverFileId?: string
+    serverFileId?: string,
+    opts?: { pendingSave?: boolean; wroteToDiskDuringDecrypt?: boolean }
   ): Promise<void> {
     const isChunked = (metadata as ChunkedEncryptionMetadata).isChunked ?? false;
     // A02: sasUrl không được lưu vào lịch sử (xem downloadHistory.ts) — chỉ dùng
@@ -132,17 +177,19 @@ export function useDownload(): UseDownloadReturn {
       serverFileId,
     });
     void recordDownloadLog({ sasUrl: logSasUrl, serverFileId });
-      setState({
-        stage: "done",
-        error: "",
-        fileName: metadata.fileName,
-        chunkProgress: null,
-        isChunkedFile: isChunked,
-        verifiedMeta: metadata,
-        plaintextChecksum: metadata.plaintextChecksum ?? "",
-        bytesTransferred: fileSizeBytes,
-        bytesTotal: fileSizeBytes,
-      });
+    setState({
+      stage: "done",
+      error: "",
+      fileName: metadata.fileName,
+      chunkProgress: null,
+      isChunkedFile: isChunked,
+      verifiedMeta: metadata,
+      plaintextChecksum: metadata.plaintextChecksum ?? "",
+      bytesTransferred: fileSizeBytes,
+      bytesTotal: fileSizeBytes,
+      pendingSave: opts?.pendingSave ?? false,
+      wroteToDiskDuringDecrypt: opts?.wroteToDiskDuringDecrypt ?? false,
+    });
   }
 
   async function runStreamingDecrypt(
@@ -179,6 +226,8 @@ export function useDownload(): UseDownloadReturn {
       plaintextChecksum: "",
       bytesTransferred: 0,
       bytesTotal: metadata.fileSize,
+      pendingSave: false,
+      wroteToDiskDuringDecrypt: false,
     });
 
     let session: Awaited<ReturnType<typeof pickSaveFile>> | null = null;
@@ -208,7 +257,10 @@ export function useDownload(): UseDownloadReturn {
       );
       await closeSaveFile(session.writable);
       session = null;
-      await finishDownload(metadata, fileSizeBytes, logSasUrl, fileId);
+      await finishDownload(metadata, fileSizeBytes, logSasUrl, fileId, {
+        pendingSave: false,
+        wroteToDiskDuringDecrypt: true,
+      });
     } catch (e) {
       if (isAbortError(e) || (e as Error)?.message === "CANCELLED") {
         cancel();
@@ -258,6 +310,8 @@ export function useDownload(): UseDownloadReturn {
       plaintextChecksum: "",
       bytesTransferred: 0,
       bytesTotal: 0,
+      pendingSave: false,
+      wroteToDiskDuringDecrypt: false,
     });
 
     try {
@@ -306,12 +360,19 @@ export function useDownload(): UseDownloadReturn {
       }
       if (signal.aborted) throw new Error("CANCELLED");
 
-      downloadBlob(plaintext, metadata.fileName, metadata.mimeType);
+      // P1: hold plaintext in RAM — do not auto-write to disk until user Saves.
+      clearPendingPlaintext();
+      pendingRef.current = {
+        data: plaintext,
+        fileName: metadata.fileName,
+        mimeType: metadata.mimeType || "application/octet-stream",
+      };
       await finishDownload(
         metadata,
         plaintext.byteLength,
         logSasUrl,
-        serverFileId
+        serverFileId,
+        { pendingSave: true, wroteToDiskDuringDecrypt: false }
       );
     } catch (e) {
       if (isAbortError(e) || (e as Error)?.message === "CANCELLED") {
@@ -416,6 +477,7 @@ export function useDownload(): UseDownloadReturn {
   function reset() {
     abortRef.current?.abort();
     abortRef.current = null;
+    clearPendingPlaintext();
     setState(initialState);
   }
 
@@ -424,6 +486,8 @@ export function useDownload(): UseDownloadReturn {
     transferStats,
     downloadAndDecrypt,
     downloadVaultFile,
+    savePendingFile,
+    discardPendingFile,
     cancel,
     reset,
   };

@@ -131,7 +131,7 @@ export default function UploadPage() {
 
   useEffect(() => {
     if (searchTimerRef.current !== null) window.clearTimeout(searchTimerRef.current);
-    if (!searchQuery.trim() || searchQuery.trim().length < 2) {
+    if (!searchQuery.trim() || searchQuery.trim().length < 3) {
       setSearchResults([]);
       return;
     }

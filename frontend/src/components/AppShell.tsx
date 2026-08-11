@@ -23,6 +23,7 @@ import PageBackground from "./PageBackground";
 import ThemeToggle from "./ThemeToggle";
 import LanguageToggle from "./LanguageToggle";
 import { LockSendMark } from "./LockSendLogo";
+import { safeInitial, safeLabel } from "../utils/safeLabel";
 
 import UploadPage from "../pages/UploadPage";
 import DownloadPage from "../pages/DownloadPage";
@@ -119,7 +120,9 @@ export default function AppShell() {
   const roleCfg = ROLE_CONFIG[role] ?? ROLE_CONFIG.owner;
   const isRecipient = role === "recipient";
   const isAdmin = role === "admin";
-  const initials = (user?.display_name || user?.email || "U").slice(0, 2).toUpperCase();
+  const isAdminRoute = location.pathname.startsWith("/admin");
+  const contentMax = isAdminRoute ? "max-w-7xl" : "max-w-6xl";
+  const initials = safeInitial(user?.display_name || user?.email, "U");
 
   const {
     inboxItems,
@@ -187,7 +190,7 @@ export default function AppShell() {
       <div className="relative z-10 flex flex-col flex-1 min-h-screen w-full">
         {/* ── Top navigation bar ── */}
         <header className={header.bar}>
-          <div className="max-w-6xl mx-auto px-5 h-14 flex items-center justify-between gap-4">
+          <div className={`${contentMax} mx-auto px-5 h-14 flex items-center justify-between gap-4`}>
             {/* Brand */}
             <div className="flex items-center gap-3 shrink-0">
               <LockSendMark />
@@ -273,7 +276,7 @@ export default function AppShell() {
                   </div>
                   <div className="hidden sm:flex flex-col leading-none gap-0.5">
                     <span className={`text-[12px] font-medium max-w-[110px] truncate ${text.secondary}`}>
-                      {user?.display_name || user?.email}
+                      {safeLabel(user?.display_name, user?.email ?? "User", 40)}
                     </span>
                     <span className={`${roleCfg.badgeClass} w-fit`}>
                       {roleCfg.label}
@@ -295,7 +298,7 @@ export default function AppShell() {
         </header>
 
         {/* ── Page content ── */}
-        <main className="flex-1 max-w-6xl w-full mx-auto px-5 py-8">
+        <main className={`flex-1 ${contentMax} w-full min-w-0 mx-auto px-5 py-8`}>
           <SecurityAlertsBanner />
 
           <Routes>

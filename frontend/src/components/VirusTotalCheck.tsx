@@ -13,6 +13,9 @@ import { text } from "../styles/theme";
 
 interface Props {
   sha256: string;
+  onResult?: (result: VirusTotalHashResult | null) => void;
+  /** Show expanded privacy / residual-risk copy (P0). */
+  autoPrompt?: boolean;
 }
 
 /**
@@ -34,12 +37,13 @@ function safeVirusTotalUrl(raw: string | null | undefined): string | null {
   }
 }
 
-export default function VirusTotalCheck({ sha256 }: Props) {
+export default function VirusTotalCheck({ sha256, onResult, autoPrompt }: Props) {
   const t = useT();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<VirusTotalHashResult | null>(null);
   const [error, setError] = useState("");
+  const [privacyAck, setPrivacyAck] = useState(false);
 
   useEffect(() => {
     void getIntegrationsStatus()
@@ -71,12 +75,18 @@ export default function VirusTotalCheck({ sha256 }: Props) {
   }
 
   async function handleCheck() {
+    if (autoPrompt && !privacyAck) {
+      if (!confirm(t("virusTotal.privacyConfirm"))) return;
+      setPrivacyAck(true);
+    }
     setLoading(true);
     setError("");
     setResult(null);
+    onResult?.(null);
     try {
       const res = await checkHashVirusTotal(sha256);
       setResult(res);
+      onResult?.(res);
     } catch (e) {
       setError(apiErrorDetail(e, t("virusTotal.failed")));
     } finally {
@@ -108,11 +118,13 @@ export default function VirusTotalCheck({ sha256 }: Props) {
 
   return (
     <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-white/10">
+      <p className={`text-[11px] leading-relaxed ${text.muted}`}>
+        {t("virusTotal.hashOnlyNote")}. {t("virusTotal.privacyHint")}
+      </p>
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="secondary" loading={loading} onClick={() => void handleCheck()}>
           {t("virusTotal.scan")}
         </Button>
-        <span className={`text-[11px] ${text.muted}`}>{t("virusTotal.hashOnlyNote")}</span>
       </div>
 
       {error && <Alert tone="error">{error}</Alert>}
@@ -127,6 +139,9 @@ export default function VirusTotalCheck({ sha256 }: Props) {
                 total: result.total_engines,
               })}
             </p>
+          )}
+          {!result.known && result.message && (
+            <p className="text-xs mt-1 opacity-90">{result.message}</p>
           )}
           {safePermalink && (
             <a

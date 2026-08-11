@@ -19,6 +19,7 @@ import PageHeader from "../components/ui/PageHeader";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import Alert from "../components/ui/Alert";
+import PostDecryptSafetyPanel from "../components/PostDecryptSafetyPanel";
 import PageLoader, { LoadingSpinner } from "../components/LoadingSpinner";
 import { isUnlocked } from "../utils/keyVault";
 import { dropzone, inputBase, text } from "../styles/theme";
@@ -56,7 +57,12 @@ function VaultFileRow({
     error,
     fileName,
     chunkProgress,
+    plaintextChecksum,
+    pendingSave,
+    wroteToDiskDuringDecrypt,
     downloadVaultFile,
+    savePendingFile,
+    discardPendingFile,
     cancel,
     reset,
   } = useDownload();
@@ -117,7 +123,21 @@ function VaultFileRow({
       </div>
 
       {stage === "done" && (
-        <Alert tone="success">{t("vault.downloaded", { name: fileName })}</Alert>
+        <>
+          <Alert tone="success">{t("vault.downloaded", { name: fileName })}</Alert>
+          <PostDecryptSafetyPanel
+            fileName={fileName || file.original_filename}
+            sha256={plaintextChecksum}
+            pendingSave={pendingSave}
+            wroteToDiskDuringDecrypt={wroteToDiskDuringDecrypt}
+            onSave={() => {
+              savePendingFile();
+            }}
+            onDiscard={() => {
+              discardPendingFile();
+            }}
+          />
+        </>
       )}
       {(error || stage === "error") && error && (
         <Alert tone="error">{error}</Alert>

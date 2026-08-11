@@ -6,7 +6,7 @@ export default function AdminLayout() {
   const t = useT();
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
+    <div className="w-full min-w-0 space-y-6">
       <header>
         <h1 className={`text-2xl font-bold ${text.primary} tracking-tight`}>{t("nav.admin")}</h1>
       </header>

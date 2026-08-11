@@ -10,7 +10,7 @@ import PageHeader from "../components/ui/PageHeader";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import Alert from "../components/ui/Alert";
-import VirusTotalCheck from "../components/VirusTotalCheck";
+import PostDecryptSafetyPanel from "../components/PostDecryptSafetyPanel";
 import TransferProgressPanel from "../components/TransferProgressPanel";
 import { useT } from "../i18n/context";
 import { label, textareaBase } from "../styles/theme";
@@ -38,7 +38,11 @@ export default function DownloadPage() {
     isChunkedFile,
     plaintextChecksum,
     transferStats,
+    pendingSave,
+    wroteToDiskDuringDecrypt,
     downloadAndDecrypt,
+    savePendingFile,
+    discardPendingFile,
     cancel,
     reset,
   } = useDownload();
@@ -108,7 +112,18 @@ export default function DownloadPage() {
         {stage === "done" && (
           <>
             <Alert tone="success">{fileName || t("download.success")}</Alert>
-            <VirusTotalCheck sha256={plaintextChecksum} />
+            <PostDecryptSafetyPanel
+              fileName={fileName}
+              sha256={plaintextChecksum}
+              pendingSave={pendingSave}
+              wroteToDiskDuringDecrypt={wroteToDiskDuringDecrypt}
+              onSave={() => {
+                savePendingFile();
+              }}
+              onDiscard={() => {
+                discardPendingFile();
+              }}
+            />
           </>
         )}
 

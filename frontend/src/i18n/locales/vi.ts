@@ -105,7 +105,7 @@ export const vi = {
     decrypting: "Đang giải mã…",
     decryptChunk: "Giải mã chunk {done}/{total}",
     downloadDecrypt: "Tải & Giải mã",
-    success: "Giải mã xong — file đã lưu về máy",
+    success: "Giải mã xong — kiểm tra an toàn trước khi lưu file",
     sasRequired: "Vui lòng nhập SAS Link.",
     keysLocked: "Chưa mở khóa keypair. Vào trang Keys, nhập passphrase (hoặc tạo key mới).",
     largeFileBrowser:
@@ -202,6 +202,10 @@ export const vi = {
     searchRecipientPlaceholder: "Email hoặc tên…",
     unlockBeforeShare: "Mở khóa keypair trước khi chia sẻ",
     needRecipient: "Chọn ít nhất một người nhận",
+    currentRecipients: "Người nhận hiện tại",
+    noRecipientsYet: "Chưa có người nhận",
+    revoke: "Thu hồi",
+    revoked: "Đã thu hồi",
   },
   history: {
     title: "Lịch sử",
@@ -430,6 +434,30 @@ export const vi = {
     engines: "{malicious} độc hại / {total} engine",
     viewReport: "Xem trên VirusTotal",
     hashOnlyNote: "Chỉ gửi SHA-256, không gửi file",
+    privacyHint:
+      "Tra hash có thể cho biết nội dung đã từng xuất hiện trên VirusTotal. Chỉ opt-in; không thay antivirus trên máy.",
+    privacyConfirm:
+      "Chỉ gửi SHA-256 lên VirusTotal (không gửi file)? Hash có thể lộ metadata danh tiếng nếu đã có trên VT.",
+    safetyTitle: "Trước khi lưu hoặc mở file",
+    safetyHashOnly: "VirusTotal (nếu dùng) chỉ nhận SHA-256 — LockSend không upload plaintext lên VT.",
+    safetyNotAv: "VT là tra cứu danh tiếng, không phải antivirus endpoint. Hãy bật Windows Defender / AV.",
+    safetyDontOpen: "Không mở/chạy file cho đến khi đã kiểm tra danh tiếng và/hoặc AV máy.",
+    safetyHeldInRam: "Bản rõ đang giữ trong RAM trình duyệt cho tới khi bạn bấm Lưu hoặc Hủy.",
+    safetyStreamedToDisk:
+      "File lớn (streaming) đã ghi plaintext ra đường dẫn bạn chọn khi giải mã — hãy quét AV file đó.",
+    safetyHighRiskExt: "Tên file thuộc nhóm rủi ro cao (exe/script/macro). Cần thận trọng hơn.",
+    pendingSaveHint: "Giải mã thành công. Chỉ lưu ra đĩa sau khi xem các kiểm tra bên dưới.",
+    streamedAvHint: "Hãy quét file đã lưu bằng antivirus máy trước khi mở.",
+    saveFile: "Lưu file về máy",
+    discardPlaintext: "Hủy bản rõ",
+    blockSaveMalicious: "Không cho lưu: VirusTotal báo hash độc hại. Hãy hủy bản rõ.",
+    confirmSaveSuspicious: "VirusTotal đánh dấu đáng ngờ. Vẫn lưu?",
+    confirmSaveHighRiskNoScan:
+      "Loại file rủi ro cao và chưa có kết quả VirusTotal. Lưu mà không quét?",
+    confirmSaveUnknown: "Hash chưa có trên VirusTotal. Vẫn lưu và quét bằng AV máy?",
+    maliciousAction: "Không mở file này. Hủy bản rõ và xóa mọi bản đã ghi ra đĩa.",
+    p2SandboxNote:
+      "Roadmap P2: chỉ mở loại rủi ro cao trong sandbox/viewer tách biệt. Hiện tại dùng AV máy và không thực thi.",
   },
   admin: {
     users: "Người dùng",

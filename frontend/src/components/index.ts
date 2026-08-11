@@ -16,4 +16,5 @@ export { default as ProtectedRoute } from "./ProtectedRoute";
 export { default as SecurityAlertsBanner } from "./SecurityAlertsBanner";
 export { default as ThemeToggle } from "./ThemeToggle";
 export { default as VirusTotalCheck } from "./VirusTotalCheck";
+export { default as PostDecryptSafetyPanel } from "./PostDecryptSafetyPanel";
 export { default as VaultShareDialog } from "./VaultShareDialog";

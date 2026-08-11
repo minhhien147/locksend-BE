@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "start": "serve dist --single --listen tcp://0.0.0.0:${PORT:-3000}",
+    "start": "serve dist --single --listen tcp://0.0.0.0:${PORT:-3000} -c serve.json",
     "bench:multiformat": "node scripts/bench-multiformat.mjs",
     "bench:crypto": "node scripts/bench-crypto-only.mjs"
   },

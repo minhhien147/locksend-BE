@@ -4,6 +4,7 @@ import api from "../utils/api";
 import PageLoader, { LoadingSpinner } from "../components/LoadingSpinner";
 import { admin, inputBase, surfaceCard } from "../styles/theme";
 import { useT } from "../i18n/context";
+import { safeInitial, safeLabel } from "../utils/safeLabel";
 
 interface UserRow {
   id: string;
@@ -164,13 +165,13 @@ export default function AdminUsersPage() {
         </div>
       )}
 
-      <div className={`flex flex-wrap gap-x-4 gap-y-2 ${admin.legend}`}>
+      <div className={`flex flex-wrap items-center gap-x-5 gap-y-2 ${admin.legend}`}>
         {ROLE_OPTIONS.map((r) => (
-          <div key={r} className="flex items-center gap-2">
+          <div key={r} className="flex items-center gap-2 shrink-0">
             <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide ${ROLE_BADGE[r]}`}>
               {r}
             </span>
-            <span>
+            <span className="whitespace-nowrap">
               {r === "owner"
                 ? t("admin.usersPage.roleOwnerDesc")
                 : r === "recipient"
@@ -181,7 +182,7 @@ export default function AdminUsersPage() {
         ))}
       </div>
 
-      <div className={`${surfaceCard} overflow-hidden`}>
+      <div className={`${surfaceCard} overflow-x-auto`}>
         {loading ? (
           <PageLoader
             variant="embedded"
@@ -195,39 +196,43 @@ export default function AdminUsersPage() {
               : t("admin.usersPage.empty")}
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[640px]">
+          <table className="w-full text-sm min-w-[920px] table-fixed">
               <thead>
                 <tr className={admin.tableHead}>
-                  <th className="px-4 sm:px-5 py-3">{t("admin.usersPage.colUser")}</th>
-                  <th className="px-4 sm:px-5 py-3">{t("admin.usersPage.colRole")}</th>
-                  <th className="px-4 sm:px-5 py-3">{t("admin.usersPage.colPlan")}</th>
-                  <th className="px-4 sm:px-5 py-3 whitespace-nowrap">{t("admin.usersPage.colCreated")}</th>
-                  <th className="px-4 sm:px-5 py-3 w-44">{t("admin.usersPage.colActions")}</th>
+                  <th className="px-4 sm:px-5 py-3 w-[28%] text-left">{t("admin.usersPage.colUser")}</th>
+                  <th className="px-4 sm:px-5 py-3 w-[14%] text-left">{t("admin.usersPage.colRole")}</th>
+                  <th className="px-4 sm:px-5 py-3 w-[20%] text-left">{t("admin.usersPage.colPlan")}</th>
+                  <th className="px-4 sm:px-5 py-3 w-[12%] text-left whitespace-nowrap">{t("admin.usersPage.colCreated")}</th>
+                  <th className="px-4 sm:px-5 py-3 w-[26%] text-left">{t("admin.usersPage.colActions")}</th>
                 </tr>
               </thead>
               <tbody className={admin.tableDivide}>
                 {users.map((u) => {
                   const isMe = u.id === me?.user_id;
                   const isBusy = changing === u.id;
+                  const label = safeLabel(u.display_name, u.email ?? u.id, 48);
                   return (
                     <tr
                       key={u.id}
                       className={`${admin.rowHover} ${isMe ? admin.rowHighlight : ""}`}
                     >
                       <td className="px-4 sm:px-5 py-3.5">
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
                           <div className="w-9 h-9 rounded-full bg-slate-200 dark:bg-slate-700 flex items-center justify-center text-slate-800 dark:text-slate-200 font-semibold text-sm shrink-0">
-                            {(u.display_name || u.email || "U")[0].toUpperCase()}
+                            {safeInitial(u.display_name || u.email)}
                           </div>
                           <div className="min-w-0">
                             <div className={`${admin.cellName} flex items-center gap-2 flex-wrap`}>
-                              <span className="truncate">{u.display_name || u.email}</span>
+                              <span className="truncate" title={u.display_name ?? undefined}>
+                                {label}
+                              </span>
                               {isMe && (
                                 <span className={admin.selfTag}>{t("admin.usersPage.selfTag")}</span>
                               )}
                             </div>
-                            <div className={`${admin.cellSub} truncate`}>{u.email}</div>
+                            <div className={`${admin.cellSub} truncate`} title={u.email ?? undefined}>
+                              {u.email}
+                            </div>
                           </div>
                         </div>
                       </td>
@@ -254,7 +259,7 @@ export default function AdminUsersPage() {
                       </td>
 
                       <td className="px-4 sm:px-5 py-3.5">
-                        <div className="flex flex-col gap-1">
+                        <div className="flex flex-col gap-1 min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span
                               className={`inline-flex px-2.5 py-1 rounded-md text-[11px] font-semibold uppercase tracking-wide ${
@@ -279,7 +284,7 @@ export default function AdminUsersPage() {
                         </div>
                       </td>
 
-                      <td className={`px-4 sm:px-5 py-3.5 ${admin.cellMeta}`}>
+                      <td className={`px-4 sm:px-5 py-3.5 whitespace-nowrap ${admin.cellMeta}`}>
                         {new Date(u.created_at).toLocaleDateString("vi-VN", {
                           day: "2-digit",
                           month: "2-digit",
@@ -289,12 +294,12 @@ export default function AdminUsersPage() {
 
                       <td className="px-4 sm:px-5 py-3.5">
                         {!isMe && (
-                          <div className="flex flex-col gap-2">
+                          <div className="flex flex-col sm:flex-row flex-wrap gap-2">
                             <button
                               type="button"
                               onClick={() => void handleStoragePlanChange(u.id, u.storage_plan === "pro" ? "free" : "pro")}
                               disabled={isBusy}
-                              className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border transition ${
+                              className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border transition whitespace-nowrap ${
                                 u.storage_plan === "pro"
                                   ? "border-slate-500/30 text-slate-300 hover:bg-slate-500/10"
                                   : "border-amber-400/30 text-amber-300 hover:bg-amber-500/10"
@@ -312,7 +317,7 @@ export default function AdminUsersPage() {
                               type="button"
                               onClick={() => void handleDelete(u.id, u.email)}
                               disabled={isBusy}
-                              className={admin.deleteBtn}
+                              className={`${admin.deleteBtn} whitespace-nowrap`}
                             >
                               {isBusy ? (
                                 <LoadingSpinner size="xs" />
@@ -331,7 +336,6 @@ export default function AdminUsersPage() {
                 })}
               </tbody>
             </table>
-          </div>
         )}
       </div>
 

@@ -3,6 +3,7 @@ import api from "../utils/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { admin, badge, btn, inputBase, surfaceCard, text } from "../styles/theme";
 import { useT } from "../i18n/context";
+import { safeLabel } from "../utils/safeLabel";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -381,7 +382,7 @@ export default function AdminActivityPage() {
       )}
 
       {/* Table */}
-      <div className={surfaceCard}>
+      <div className={`${surfaceCard} overflow-x-auto`}>
         {loading ? (
           <div className="flex justify-center py-12">
             <LoadingSpinner size="md" />
@@ -389,53 +390,64 @@ export default function AdminActivityPage() {
         ) : data && data.items.length === 0 ? (
           <p className={`text-center py-10 text-sm ${text.muted}`}>{t("admin.activity.empty")}</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse">
+          <table className="w-full text-sm border-collapse min-w-[960px]">
               <thead>
                 <tr className={admin.tableHead}>
-                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase whitespace-nowrap">
+                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase whitespace-nowrap text-left">
                     {t("admin.activity.colTime")}
                   </th>
-                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase">
+                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase text-left w-[22%]">
                     {t("admin.activity.colUser")}
                   </th>
-                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase">
+                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase text-left">
                     {t("admin.activity.colType")}
                   </th>
-                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase">
+                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase text-left">
                     {t("admin.activity.colDetail")}
                   </th>
-                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase whitespace-nowrap">
+                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase whitespace-nowrap text-left">
                     {t("admin.activity.colIp")}
                   </th>
-                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase whitespace-nowrap">
+                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase whitespace-nowrap text-left">
                     {t("admin.activity.colSize")}
                   </th>
-                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase">
+                  <th className="px-4 py-3 font-semibold tracking-wider text-[10px] uppercase text-left">
                     {t("admin.activity.colStatus")}
                   </th>
                 </tr>
               </thead>
               <tbody className={admin.tableDivide}>
-                {data?.items.map((item) => (
+                {data?.items.map((item) => {
+                  const displayName = safeLabel(
+                    item.user_display_name,
+                    "",
+                    48
+                  );
+                  const showDisplay =
+                    Boolean(displayName) &&
+                    displayName !== "—" &&
+                    displayName !== (item.user_email ?? "");
+                  return (
                   <tr key={item.id} className={admin.rowHover}>
                     {/* Time */}
                     <td className="px-4 py-3 whitespace-nowrap">
                       <span className={admin.cellMeta}>{fmtTime(item.created_at)}</span>
                     </td>
                     {/* User */}
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 max-w-[240px]">
                       {item.user_id ? (
                         <button
                           onClick={() => item.user_id && fetchSummary(item.user_id)}
-                          className="text-left group"
+                          className="text-left group min-w-0 w-full"
                           title="Xem tóm tắt user"
                         >
-                          <p className={`${admin.cellName} group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors`}>
+                          <p className={`${admin.cellName} group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors truncate`}>
                             {item.user_email ?? item.user_id}
                           </p>
-                          {item.user_display_name && item.user_display_name !== item.user_email && (
-                            <p className={admin.cellSub}>{item.user_display_name}</p>
+                          {showDisplay && (
+                            <p className={`${admin.cellSub} truncate`} title={item.user_display_name ?? undefined}>
+                              {displayName}
+                            </p>
                           )}
                         </button>
                       ) : (
@@ -474,10 +486,10 @@ export default function AdminActivityPage() {
                       )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
-          </div>
         )}
 
         {/* Pagination footer */}

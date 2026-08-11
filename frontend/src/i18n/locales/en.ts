@@ -103,7 +103,7 @@ export const en = {
     decrypting: "Decrypting…",
     decryptChunk: "Decrypting chunk {done}/{total}",
     downloadDecrypt: "Download & decrypt",
-    success: "Decrypted — file saved to your device",
+    success: "Decrypted — review safety checks before saving",
     sasRequired: "Please enter a SAS link.",
     keysLocked: "Keypair is locked. Open Keys, enter your passphrase (or create a new keypair).",
     largeFileBrowser:
@@ -200,6 +200,10 @@ export const en = {
     searchRecipientPlaceholder: "Email or name…",
     unlockBeforeShare: "Unlock your keypair before sharing",
     needRecipient: "Select at least one recipient",
+    currentRecipients: "Current recipients",
+    noRecipientsYet: "No recipients yet",
+    revoke: "Revoke",
+    revoked: "Revoked",
   },
   history: {
     title: "History",
@@ -428,6 +432,30 @@ export const en = {
     engines: "{malicious} malicious / {total} engines",
     viewReport: "View on VirusTotal",
     hashOnlyNote: "Sends SHA-256 only, not the file",
+    privacyHint:
+      "Hash lookup may reveal that this content is known to VirusTotal. Opt-in only; not a substitute for endpoint antivirus.",
+    privacyConfirm:
+      "Send only the SHA-256 hash to VirusTotal (not the file)? This may reveal file reputation metadata if the hash is already known.",
+    safetyTitle: "Before you save or open this file",
+    safetyHashOnly: "VirusTotal (if used) receives SHA-256 only — LockSend never uploads plaintext to VT.",
+    safetyNotAv: "VT is reputation lookup, not endpoint antivirus. Keep Windows Defender / AV enabled.",
+    safetyDontOpen: "Do not open/run the file until you have checked reputation and/or local AV.",
+    safetyHeldInRam: "Plaintext is held in browser RAM until you click Save or Discard.",
+    safetyStreamedToDisk:
+      "Large-file streaming already wrote plaintext to the path you chose during decrypt — run local AV on that file.",
+    safetyHighRiskExt: "This filename looks high-risk (e.g. exe/script/macro). Extra caution required.",
+    pendingSaveHint: "Decryption succeeded. Save to disk only after reviewing the checks below.",
+    streamedAvHint: "Scan the saved file with your local antivirus before opening it.",
+    saveFile: "Save file to device",
+    discardPlaintext: "Discard plaintext",
+    blockSaveMalicious: "Save blocked: VirusTotal reported this hash as malicious. Discard the plaintext.",
+    confirmSaveSuspicious: "VirusTotal marked this hash suspicious. Save anyway?",
+    confirmSaveHighRiskNoScan:
+      "High-risk file type and no VirusTotal result yet. Save without scanning?",
+    confirmSaveUnknown: "Hash is unknown to VirusTotal. Save anyway and scan with local AV?",
+    maliciousAction: "Do not open this file. Discard plaintext and delete any copy already on disk.",
+    p2SandboxNote:
+      "P2 roadmap: open high-risk types only inside an isolated sandbox/viewer. For now use local AV + do not execute.",
   },
   admin: {
     users: "Users",
